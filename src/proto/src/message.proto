@@ -1,0 +1,4 @@
+syntax = "proto3";
+package proto.message;
+
+message Message { uint64 to = 1; }
