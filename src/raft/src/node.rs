@@ -1,8 +1,10 @@
 use std::num::NonZeroU64;
 
-use crate::error::Result;
 use crate::log::Log;
+use crate::{config::InitialConfig, error::Result};
 use proto::proto::*;
+use rand::RngExt;
+use tracing::{debug, error, info};
 
 pub struct Node {
     pub id: NodeId,
@@ -21,24 +23,29 @@ pub struct Node {
 
     pub role: Role,
 
-    config: Config,
-}
+    config: InitialConfig,
 
-struct Config {
     /// If a follower does not receive any message in [election_timeout] ticks, it
     /// becomes a candidate and starts a new election. This value is a random value
     /// set at the start of an election inside the range ([max_election_timeout],
     /// [min_election_timeout])
     election_timeout: u64,
-    max_election_timeout: u64,
-    min_election_timeout: u64,
 }
 
 /// A (potentially invalid) node id.
 ///
 /// `0` is a sentinel value used for messages which are local to a node.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct NodeId(Option<NonZeroU64>);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ValidNodeId(NonZeroU64);
+
+impl From<ValidNodeId> for NodeId {
+    fn from(value: ValidNodeId) -> NodeId {
+        NodeId(Some(value.0))
+    }
+}
 
 pub const INVALID_ID: NodeId = NodeId(None);
 
@@ -53,6 +60,18 @@ pub enum Role {
     Follower(FollowerState),
     Candidate(CandidateState),
     Leader,
+}
+
+impl Role {
+    #[inline]
+    pub fn become_candidate(self) -> Role {
+        match self {
+            Role::Follower(_) | Role::Candidate(_) => Role::Candidate(CandidateState::default()),
+            Role::Leader => {
+                unreachable!("Invalid state transition: [leader -> candidate]");
+            }
+        }
+    }
 }
 
 #[derive(PartialEq, Clone, Copy, Default)]
@@ -97,8 +116,7 @@ impl Node {
         match &mut self.role {
             Role::Follower(state) => {
                 state.ticks_since_last_msg += 1;
-                if !state.election_timeout_passed(self.config.election_timeout) || !state.promotable
-                {
+                if !state.election_timeout_passed(self.election_timeout) || !state.promotable {
                     return;
                 }
 
@@ -110,7 +128,7 @@ impl Node {
             }
             Role::Candidate(state) => {
                 state.ticks_since_election_start += 1;
-                if !state.election_timeout_passed(self.config.election_timeout) {
+                if !state.election_timeout_passed(self.election_timeout) {
                     return;
                 }
 
@@ -124,18 +142,34 @@ impl Node {
         }
     }
 
+    /// Start a campaign to attempt to become a leader.
     pub fn start_campaign(&mut self) {
         self.term += 1;
-        match &mut self.role {
-            // Promote from follower to candidate
-            Role::Follower(_) => self.role = Role::Candidate(CandidateState::default()),
-            Role::Candidate(CandidateState {
-                ticks_since_election_start,
-            }) => *ticks_since_election_start = 0,
-            Role::Leader => todo!(),
-        }
+        self.role = self.role.become_candidate();
+        info!("Node {:?} became candidate at term {}", self.id, self.term);
+
+        self.start_term();
+
         // TODO: send `RequestVote` to all nodes
         todo!()
+    }
+
+    pub fn start_term(&mut self) {
+        self.vote = INVALID_ID;
+        self.leader_id = INVALID_ID;
+        self.generate_random_election_timeout();
+    }
+
+    pub fn generate_random_election_timeout(&mut self) {
+        self.election_timeout = rand::rng().random_range(
+            self.config.min_ticks_before_election.into()
+                ..self.config.max_ticks_before_election.into(),
+        );
+
+        debug!(
+            "[{:?}] New election timeout '{}'",
+            self.id, self.election_timeout
+        );
     }
 }
 

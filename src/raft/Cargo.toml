@@ -5,4 +5,6 @@ edition = "2024"
 
 [dependencies]
 proto = { path = "../proto" }
+rand = "0.10.1"
 thiserror = "2.0.18"
+tracing = "0.1.44"
