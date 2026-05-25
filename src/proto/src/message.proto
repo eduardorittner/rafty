@@ -1,4 +1,34 @@
 syntax = "proto3";
 package proto.message;
 
-message Message { uint64 to = 1; }
+// A log entry to be persisted.
+//
+// `data` is an opaque bag of application-specific bytes which are only copied
+// around, but never modified by the raft protocol.
+message Entry {
+  uint64 term = 1;
+  uint64 index = 2;
+  bytes data = 3;
+}
+
+message Message {
+  MessageType msg_type = 1;
+  uint64 to = 2;
+  uint64 from = 3;
+  uint64 term = 4;
+  uint64 last_term = 5;
+  uint64 last_index = 6;
+  repeated Entry entries = 7;
+}
+
+enum MessageType {
+  Heartbeat = 0;
+  // Signals to the current node to become a candidate (if it`s not already one)
+  // and start a campaing, sending `RequestVote` messages to all nodes. Never
+  // sent accross nodes.
+  StartCampaign = 1;
+  AppendEntries = 2;
+  AppendEntriesResponse = 3;
+  RequestVote = 4;
+  RequestVoteResponse = 5;
+}
