@@ -6,6 +6,8 @@ use crate::ValidNodeId;
 pub struct InitialConfig {
     /// Identity of the local raft, must be unique in the cluster.
     pub id: ValidNodeId,
+    /// Number of nodes in the cluster. Valid node ids are in the range [1, cluster_size]
+    pub cluster_size: u64,
     /// Minimum number of ticks before a follower attempts to become a leader.
     pub min_ticks_before_election: NonZeroU64,
     /// Maximum number of ticks before a follower attempts to become a leader.

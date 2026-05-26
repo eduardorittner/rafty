@@ -1,12 +1,14 @@
 use std::num::NonZeroU64;
 
+use crate::communication::Channel;
 use crate::log::Log;
+use crate::storage::Storage;
 use crate::{config::InitialConfig, error::Result};
 use proto::proto::*;
 use rand::RngExt;
 use tracing::{debug, error, info};
 
-pub struct Node {
+pub struct Node<Store: Storage, Chan: Channel> {
     pub id: NodeId,
 
     // Current term.
@@ -18,12 +20,15 @@ pub struct Node {
     // Current term leader.
     pub leader_id: NodeId,
 
-    // Raft persisted log.
-    pub log: Log,
-
     pub role: Role,
 
     config: InitialConfig,
+
+    // Raft persisted log store.
+    storage: Store,
+
+    /// Channel for sending messages
+    channel: Chan,
 
     /// If a follower does not receive any message in [election_timeout] ticks, it
     /// becomes a candidate and starts a new election. This value is a random value
@@ -97,7 +102,23 @@ impl CandidateState {
     }
 }
 
-impl Node {
+impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
+    pub fn new(id: ValidNodeId, storage: Store, channel: Chan, config: InitialConfig) -> Self {
+        let mut node = Self {
+            id: id.into(),
+            vote: INVALID_ID,
+            leader_id: INVALID_ID,
+            role: Role::Follower(FollowerState::default()),
+            term: 0,
+            election_timeout: 0,
+            config,
+            storage,
+            channel,
+        };
+        node.generate_random_election_timeout();
+        node
+    }
+
     /// Perform a state transition based on the given message.
     pub fn step(&mut self, msg: Message) -> Result<()> {
         match msg.msg_type() {
@@ -120,11 +141,7 @@ impl Node {
                     return;
                 }
 
-                self.step(new_local_message(
-                    INVALID_ID,
-                    self.id,
-                    MessageType::StartCampaign,
-                ));
+                self.step(self.new_local_msg(MessageType::StartCampaign));
             }
             Role::Candidate(state) => {
                 state.ticks_since_election_start += 1;
@@ -132,11 +149,7 @@ impl Node {
                     return;
                 }
 
-                self.step(new_local_message(
-                    INVALID_ID,
-                    self.id,
-                    MessageType::StartCampaign,
-                ));
+                self.step(self.new_local_msg(MessageType::StartCampaign));
             }
             Role::Leader => todo!(),
         }
@@ -150,8 +163,8 @@ impl Node {
 
         self.start_term();
 
-        // TODO: send `RequestVote` to all nodes
-        todo!()
+        let request_vote = self.new_broadcast_msg(MessageType::RequestVote);
+        self.channel.broadcast(request_vote);
     }
 
     pub fn start_term(&mut self) {
@@ -171,15 +184,28 @@ impl Node {
             self.id, self.election_timeout
         );
     }
-}
 
-/// Constructs a new local message.
-fn new_local_message(to: NodeId, from: NodeId, msg_type: MessageType) -> Message {
-    let mut m = Message::default();
-    m.to = to.into();
-    if let Some(from) = from.0 {
-        m.from = from.into();
+    /// Constructs a new local message.
+    ///
+    /// Local messages have both `to` and `from` fields set to `INVALID_ID` in order to
+    /// differentiate them from a brodcast message, where `to` is set to `self.id`.
+    fn new_local_msg(&self, msg_type: MessageType) -> Message {
+        let mut m = Message::default();
+        m.to = INVALID_ID.into();
+        m.from = INVALID_ID.into();
+        m.set_msg_type(msg_type);
+        m
     }
-    m.set_msg_type(msg_type);
-    m
+
+    /// Constructs a new broadcast message.
+    fn new_broadcast_msg(&self, msg_type: MessageType) -> Message {
+        let mut m = Message::default();
+        m.to = INVALID_ID.into();
+        m.from = self.id.into();
+        m.term = self.term;
+        m.last_index = self.storage.last_index();
+        m.last_term = self.storage.term(m.last_index).unwrap();
+        m.set_msg_type(msg_type);
+        m
+    }
 }
