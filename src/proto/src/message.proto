@@ -11,24 +11,23 @@ message Entry {
   bytes data = 3;
 }
 
-message Message {
-  MessageType msg_type = 1;
+message ProtoMessage {
+  ProtoMessageType msg_type = 1;
   uint64 to = 2;
   uint64 from = 3;
   uint64 term = 4;
-  uint64 last_term = 5;
-  uint64 last_index = 6;
-  repeated Entry entries = 7;
+  uint64 commit = 5;
+  uint64 last_term = 6;
+  uint64 last_index = 7;
+  repeated Entry entries = 8;
+  uint64 voted_for = 9;
+  bool success = 10;
 }
 
-enum MessageType {
+enum ProtoMessageType {
   Heartbeat = 0;
-  // Signals to the current node to become a candidate (if it`s not already one)
-  // and start a campaing, sending `RequestVote` messages to all nodes. Never
-  // sent accross nodes.
-  StartCampaign = 1;
-  AppendEntries = 2;
-  AppendEntriesResponse = 3;
-  RequestVote = 4;
-  RequestVoteResponse = 5;
+  AppendEntries = 1;
+  AppendEntriesResponse = 2;
+  RequestVote = 3;
+  RequestVoteResponse = 4;
 }

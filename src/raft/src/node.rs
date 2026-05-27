@@ -130,13 +130,13 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
 
     /// Perform a state transition based on the given message.
     pub fn step(&mut self, msg: Message) -> Result<()> {
-        match msg.msg_type() {
-            MessageType::Heartbeat => todo!(),
-            MessageType::StartCampaign => self.start_campaign(),
-            MessageType::AppendEntries => todo!(),
-            MessageType::AppendEntriesResponse => todo!(),
-            MessageType::RequestVote => todo!(),
-            MessageType::RequestVoteResponse => todo!(),
+        match msg {
+            Message::StartCampaign => self.start_campaign(),
+            Message::Heartbeat(_) => todo!(),
+            Message::Append(_) => todo!(),
+            Message::AppendResponse(_) => todo!(),
+            Message::RequestVote(m) => self.step_vote_request(m),
+            Message::RequestVoteResponse(_) => todo!(),
         }
         Ok(())
     }
@@ -150,7 +150,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                     return;
                 }
 
-                let _ = self.step(self.new_local_msg(MessageType::StartCampaign));
+                let _ = self.step(Message::StartCampaign);
             }
             Role::Candidate(state) => {
                 state.ticks_since_election_start += 1;
@@ -158,7 +158,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                     return;
                 }
 
-                let _ = self.step(self.new_local_msg(MessageType::StartCampaign));
+                let _ = self.step(Message::StartCampaign);
             }
             Role::Leader => todo!(),
         }
@@ -172,14 +172,20 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
 
         self.start_term();
 
-        let request_vote = self.new_broadcast_msg(MessageType::RequestVote);
-        self.channel.broadcast(request_vote);
+        self.channel
+            .broadcast(Message::RequestVote(self.broadcast_request_vote()).into());
     }
 
     pub fn start_term(&mut self) {
         self.voted_for = self.id;
         self.leader_id = INVALID_ID;
         self.generate_random_election_timeout();
+    }
+
+    fn step_vote_request(&mut self, req: RequestVote) {
+        if req.candidate_term < self.term {}
+
+        todo!()
     }
 
     pub fn generate_random_election_timeout(&mut self) {
@@ -194,27 +200,14 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         );
     }
 
-    /// Constructs a new local message.
-    ///
-    /// Local messages have both `to` and `from` fields set to `INVALID_ID` in order to
-    /// differentiate them from a brodcast message, where `to` is set to `self.id`.
-    fn new_local_msg(&self, msg_type: MessageType) -> Message {
-        let mut m = Message::default();
-        m.to = INVALID_ID.into();
-        m.from = INVALID_ID.into();
-        m.set_msg_type(msg_type);
-        m
-    }
-
-    /// Constructs a new broadcast message.
-    fn new_broadcast_msg(&self, msg_type: MessageType) -> Message {
-        let mut m = Message::default();
-        m.to = INVALID_ID.into();
-        m.from = self.id.into();
-        m.term = self.term;
-        m.last_index = self.storage.last_index();
-        m.last_term = self.storage.term(m.last_index).unwrap();
-        m.set_msg_type(msg_type);
-        m
+    fn broadcast_request_vote(&self) -> RequestVote {
+        let last_index = self.storage.last_index();
+        RequestVote {
+            to: INVALID_ID.into(),
+            from: self.id.into(),
+            candidate_term: self.term,
+            last_index: last_index,
+            last_term: self.storage.term(last_index).unwrap(),
+        }
     }
 }

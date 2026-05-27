@@ -1,5 +1,5 @@
 use harness::utils::{self, initial_config};
-use proto::proto::{Message, MessageType};
+use proto::proto::{Heartbeat, Message};
 use raft::Channel;
 
 const TEST_CLUSTER_SIZE: u64 = 7;
@@ -8,14 +8,16 @@ const TEST_CLUSTER_SIZE: u64 = 7;
 /// in the `utils` module.
 #[test]
 fn inter_node_communication() {
-    let heartbeat = |from, to| Message {
-        msg_type: MessageType::Heartbeat.into(),
-        to,
-        from,
-        term: 0,
-        last_term: 0,
-        last_index: 0,
-        entries: Vec::new(),
+    let heartbeat = |from, to| {
+        Message::Heartbeat(Heartbeat {
+            to,
+            from,
+            term: 0,
+            last_term: 0,
+            last_index: 0,
+            commit: 0,
+        })
+        .into()
     };
     let mut nodes = utils::cluster_from_config(initial_config(TEST_CLUSTER_SIZE));
 

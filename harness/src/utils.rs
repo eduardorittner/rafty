@@ -1,7 +1,7 @@
 use std::{num::NonZeroU64, sync::mpsc::channel};
 
 use crate::{MemStorage, TestChannel};
-use proto::proto::Message;
+use proto::proto::ProtoMessage;
 use raft::{InitialConfig, Node, ValidNodeId};
 
 pub fn basic_cluster() -> Vec<Node<MemStorage, TestChannel>> {
@@ -40,7 +40,7 @@ pub fn cluster_from_config(config: InitialConfig) -> Vec<Node<MemStorage, TestCh
 
 pub fn test_channels_from_cluster_size(size: u64) -> Vec<TestChannel> {
     let channels: Vec<_> = std::iter::repeat_n(None, size as usize)
-        .map(|_: Option<u64>| channel::<Message>())
+        .map(|_: Option<u64>| channel::<ProtoMessage>())
         .collect();
 
     let send_channels: Vec<_> = channels

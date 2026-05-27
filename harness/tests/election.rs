@@ -1,5 +1,5 @@
 use harness::utils::basic_cluster;
-use proto::proto::{Message, MessageType};
+use proto::proto::{Message, MessageType, ProtoMessage, ProtoMessageType};
 use raft::{INVALID_ID, Role};
 
 #[test]
@@ -22,14 +22,12 @@ fn start_campaign() {
     // All nodes should have received a `RequestVote` message
     for node in nodes {
         assert_eq!(
-            Message {
-                msg_type: MessageType::RequestVote.into(),
+            ProtoMessage {
+                msg_type: ProtoMessageType::RequestVote.into(),
                 to: INVALID_ID.into(),
                 from: candidate.id.into(),
                 term: 1,
-                last_term: 0,
-                last_index: 0,
-                entries: Vec::new(),
+                ..Default::default()
             },
             node.channel
                 .recv

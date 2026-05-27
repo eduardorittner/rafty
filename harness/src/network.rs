@@ -1,19 +1,19 @@
 use std::sync::mpsc::{Receiver, Sender};
 
-use proto::proto::Message;
+use proto::proto::ProtoMessage;
 use raft::Channel;
 
 /// Simple mspc based channel for testing
 #[derive(Debug)]
 pub struct TestChannel {
     /// Channels for sending to other nodes, `channels[self.id]` is a sender to its own `recv`.
-    pub channels: Vec<Sender<Message>>,
-    pub recv: Receiver<Message>,
+    pub channels: Vec<Sender<ProtoMessage>>,
+    pub recv: Receiver<ProtoMessage>,
     pub id: u64,
 }
 
 impl Channel for TestChannel {
-    fn send(&mut self, msg: Message) {
+    fn send(&mut self, msg: ProtoMessage) {
         assert!(msg.to > 0);
         let to = msg.to;
         let channel = &mut self.channels[to as usize - 1];
@@ -22,7 +22,7 @@ impl Channel for TestChannel {
     }
 
     /// Sends messages to everyone except itself
-    fn broadcast(&mut self, msg: Message) {
+    fn broadcast(&mut self, msg: ProtoMessage) {
         self.channels
             .iter_mut()
             .enumerate()
