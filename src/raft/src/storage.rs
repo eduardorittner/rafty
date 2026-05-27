@@ -19,6 +19,7 @@ pub trait Storage {
 /// A `Vec` backed `Storage` implementation.
 ///
 /// This implementation is meant for testing, and does not persist accross process crashes.
+#[derive(Debug)]
 pub struct MemStorage {
     log: Vec<Entry>,
 }

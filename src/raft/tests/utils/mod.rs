@@ -1,0 +1,55 @@
+use std::{num::NonZeroU64, sync::mpsc::channel};
+
+use proto::proto::Message;
+use raft::{InitialConfig, MemStorage, Node, TestChannel, ValidNodeId};
+
+pub fn initial_config(size: u64) -> InitialConfig {
+    InitialConfig {
+        id: ValidNodeId(NonZeroU64::new(1).unwrap()),
+        cluster_size: size,
+        min_ticks_before_election: NonZeroU64::new(100).unwrap(),
+        max_ticks_before_election: NonZeroU64::new(200).unwrap(),
+        ticks_between_heartbeats: NonZeroU64::new(10).unwrap(),
+        last_applied_idx: None,
+    }
+}
+
+/// Creates a new cluster based on `config`
+pub fn cluster_from_config(config: InitialConfig) -> Vec<Node<MemStorage, TestChannel>> {
+    let channels = test_channels_from_cluster_size(config.cluster_size);
+    let nodes: Vec<_> = channels
+        .into_iter()
+        .enumerate()
+        .map(|(id, channel)| {
+            Node::new(
+                ValidNodeId(NonZeroU64::new(id as u64 + 1).unwrap()),
+                MemStorage::new(),
+                channel,
+                config.with_id(ValidNodeId(NonZeroU64::new(id as u64 + 1).unwrap())),
+            )
+        })
+        .collect();
+
+    nodes
+}
+
+pub fn test_channels_from_cluster_size(size: u64) -> Vec<TestChannel> {
+    let channels: Vec<_> = std::iter::repeat_n(None, size as usize)
+        .map(|_: Option<u64>| channel::<Message>())
+        .collect();
+
+    let send_channels: Vec<_> = channels
+        .iter()
+        .map(|(send, _recv)| send.to_owned())
+        .collect();
+    let recv_channels: Vec<_> = channels.into_iter().map(|(_, recv)| recv).collect();
+    let node_channels: Vec<_> = recv_channels
+        .into_iter()
+        .map(|recv| TestChannel {
+            channels: send_channels.clone(),
+            recv,
+        })
+        .collect();
+
+    node_channels
+}

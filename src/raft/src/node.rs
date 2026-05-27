@@ -1,13 +1,13 @@
 use std::num::NonZeroU64;
 
 use crate::communication::Channel;
-use crate::log::Log;
 use crate::storage::Storage;
 use crate::{config::InitialConfig, error::Result};
 use proto::proto::*;
 use rand::RngExt;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
+#[derive(Debug)]
 pub struct Node<Store: Storage, Chan: Channel> {
     pub id: NodeId,
 
@@ -28,7 +28,7 @@ pub struct Node<Store: Storage, Chan: Channel> {
     storage: Store,
 
     /// Channel for sending messages
-    channel: Chan,
+    pub channel: Chan,
 
     /// If a follower does not receive any message in [election_timeout] ticks, it
     /// becomes a candidate and starts a new election. This value is a random value
@@ -44,7 +44,7 @@ pub struct Node<Store: Storage, Chan: Channel> {
 pub struct NodeId(Option<NonZeroU64>);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ValidNodeId(NonZeroU64);
+pub struct ValidNodeId(pub NonZeroU64);
 
 impl From<ValidNodeId> for NodeId {
     fn from(value: ValidNodeId) -> NodeId {
@@ -60,7 +60,7 @@ impl From<NodeId> for u64 {
     }
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Role {
     Follower(FollowerState),
     Candidate(CandidateState),
@@ -79,7 +79,7 @@ impl Role {
     }
 }
 
-#[derive(PartialEq, Clone, Copy, Default)]
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
 pub struct FollowerState {
     promotable: bool,
     ticks_since_last_msg: u64,
@@ -91,7 +91,7 @@ impl FollowerState {
     }
 }
 
-#[derive(PartialEq, Clone, Copy, Default)]
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
 pub struct CandidateState {
     ticks_since_election_start: u64,
 }
@@ -141,7 +141,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                     return;
                 }
 
-                self.step(self.new_local_msg(MessageType::StartCampaign));
+                let _ = self.step(self.new_local_msg(MessageType::StartCampaign));
             }
             Role::Candidate(state) => {
                 state.ticks_since_election_start += 1;
@@ -149,7 +149,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                     return;
                 }
 
-                self.step(self.new_local_msg(MessageType::StartCampaign));
+                let _ = self.step(self.new_local_msg(MessageType::StartCampaign));
             }
             Role::Leader => todo!(),
         }

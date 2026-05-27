@@ -3,6 +3,7 @@ use std::num::NonZeroU64;
 use crate::ValidNodeId;
 
 /// Parameters needed to initialize (or reinitialize) a raft node.
+#[derive(Debug, Clone, Copy)]
 pub struct InitialConfig {
     /// Identity of the local raft, must be unique in the cluster.
     pub id: ValidNodeId,
@@ -16,4 +17,12 @@ pub struct InitialConfig {
     pub ticks_between_heartbeats: NonZeroU64,
     /// Last applied index. Only is `Some` when restarting a raft.
     pub last_applied_idx: Option<NonZeroU64>,
+}
+
+impl InitialConfig {
+    pub fn with_id(self, id: ValidNodeId) -> Self {
+        let mut config = self;
+        config.id = id;
+        config
+    }
 }
