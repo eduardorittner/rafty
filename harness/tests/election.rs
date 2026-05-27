@@ -1,5 +1,5 @@
 use harness::utils::basic_cluster;
-use proto::proto::{Message, MessageType, ProtoMessage, ProtoMessageType};
+use proto::proto::{ProtoMessage, ProtoMessageType};
 use raft::{INVALID_ID, Role};
 
 #[test]

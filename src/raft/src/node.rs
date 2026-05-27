@@ -1,6 +1,7 @@
 use std::num::NonZeroU64;
 
 use crate::communication::Channel;
+use crate::quorum::Quorum;
 use crate::storage::Storage;
 use crate::{config::InitialConfig, error::Result};
 use proto::proto::*;
@@ -10,26 +11,21 @@ use tracing::{debug, info};
 #[derive(Debug)]
 pub struct Node<Store: Storage, Chan: Channel> {
     pub id: NodeId,
-
-    // Current term.
+    /// Current term.
     pub term: u64,
-
-    // Which peer this node voted for.
+    /// Which peer this node voted for.
     pub voted_for: NodeId,
-
-    // Current term leader.
+    /// Current term leader.
     pub leader_id: NodeId,
-
+    /// Node's current role state
     pub role: Role,
-
     pub config: InitialConfig,
-
-    // Raft persisted log store.
+    /// Raft persisted log store.
+    // TODO: we should add an intermediate `RaftLog<T: Storage>` which uses the underlying storage
+    // so we can reuse most of the raft log logic independently from the backing store
     storage: Store,
-
     /// Channel for sending messages
     pub channel: Chan,
-
     /// If a follower does not receive any message in [election_timeout] ticks, it
     /// becomes a candidate and starts a new election. This value is a random value
     /// set at the start of an election inside the range ([max_election_timeout],
@@ -60,7 +56,7 @@ impl From<NodeId> for u64 {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Role {
     Follower(FollowerState),
     Candidate(CandidateState),
@@ -69,12 +65,23 @@ pub enum Role {
 
 impl Role {
     #[inline]
-    pub fn become_candidate(self) -> Role {
+    fn become_candidate(self, cluster_size: u64, id: u64) -> Role {
         match self {
-            Role::Follower(_) | Role::Candidate(_) => Role::Candidate(CandidateState::default()),
+            Role::Follower(_) | Role::Candidate(_) => {
+                Role::Candidate(CandidateState::new(cluster_size, id))
+            }
             Role::Leader => {
                 unreachable!("Invalid state transition: [leader -> candidate]");
             }
+        }
+    }
+
+    #[inline]
+    fn become_leader(self) -> Role {
+        match self {
+            Role::Follower(_) => panic!("Invalid state transition: [follower -> leader]"),
+            Role::Candidate(_) => Role::Leader,
+            Role::Leader => panic!("Invalid state transition: [leader -> leader]"),
         }
     }
 }
@@ -100,12 +107,19 @@ impl FollowerState {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy, Default)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CandidateState {
     ticks_since_election_start: u64,
+    votes: Quorum,
 }
 
 impl CandidateState {
+    fn new(cluster_size: u64, id: u64) -> Self {
+        Self {
+            ticks_since_election_start: 0,
+            votes: Quorum::new(cluster_size, id),
+        }
+    }
     fn election_timeout_passed(&self, timeout: u64) -> bool {
         self.ticks_since_election_start >= timeout
     }
@@ -146,28 +160,48 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         match &mut self.role {
             Role::Follower(state) => {
                 state.ticks_since_last_msg += 1;
-                if !state.election_timeout_passed(self.election_timeout) || !state.promotable {
+                if state.election_timeout_passed(self.election_timeout) || !state.promotable {
+                    let _ = self.step(Message::StartCampaign);
                     return;
                 }
-
-                let _ = self.step(Message::StartCampaign);
             }
             Role::Candidate(state) => {
                 state.ticks_since_election_start += 1;
-                if !state.election_timeout_passed(self.election_timeout) {
+
+                if state.election_timeout_passed(self.election_timeout) {
+                    let _ = self.step(Message::StartCampaign);
                     return;
                 }
 
-                let _ = self.step(Message::StartCampaign);
+                if state.votes.has_majority() {
+                    self.role = self.role.to_owned().become_leader();
+                    self.start_term();
+                    self.leader_id = self.id;
+                }
             }
             Role::Leader => todo!(),
         }
     }
 
+    fn broadcast_heartbeats(&mut self) {
+        self.channel.broadcast(Message::Heartbeat(Heartbeat {
+            to: ,
+            from: (),
+            term: (),
+            commit: (),
+            last_index: (),
+            last_term: (),
+        }));
+        todo!()
+    }
+
     /// Start a campaign to attempt to become a leader.
     pub fn start_campaign(&mut self) {
         self.term += 1;
-        self.role = self.role.become_candidate();
+        self.role = self
+            .role
+            .to_owned()
+            .become_candidate(self.config.cluster_size, self.id.into());
         info!("Node {:?} became candidate at term {}", self.id, self.term);
 
         self.start_term();
@@ -208,6 +242,18 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             candidate_term: self.term,
             last_index: last_index,
             last_term: self.storage.term(last_index).unwrap(),
+        }
+    }
+
+    fn new_heartbeat_message(&self) -> Heartbeat {
+        let last_index = self.storage.last_index();
+        Heartbeat {
+            to: INVALID_ID.into(),
+            from: self.id.into(),
+            term: self.term,
+            last_index: last_index,
+            last_term: self.storage.term(last_index).unwrap(),
+            commit: todo!(),
         }
     }
 }

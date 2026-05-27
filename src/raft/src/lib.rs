@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod log;
 mod node;
+mod quorum;
 mod storage;
 
 pub use communication::*;
