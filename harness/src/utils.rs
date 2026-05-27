@@ -1,7 +1,8 @@
 use std::{num::NonZeroU64, sync::mpsc::channel};
 
+use crate::{MemStorage, TestChannel};
 use proto::proto::Message;
-use raft::{InitialConfig, MemStorage, Node, TestChannel, ValidNodeId};
+use raft::{InitialConfig, Node, ValidNodeId};
 
 pub fn initial_config(size: u64) -> InitialConfig {
     InitialConfig {

@@ -1,0 +1,8 @@
+[package]
+name = "harness"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+raft = { path = "../src/raft" }
+proto = { path = "../src/proto" }

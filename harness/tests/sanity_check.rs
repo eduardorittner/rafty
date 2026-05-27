@@ -1,9 +1,6 @@
+use harness::utils::{self, initial_config};
 use proto::proto::{Message, MessageType};
 use raft::Channel;
-
-use crate::utils::initial_config;
-
-mod utils;
 
 const TEST_CLUSTER_SIZE: u64 = 7;
 
