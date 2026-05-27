@@ -4,13 +4,17 @@ use crate::{MemStorage, TestChannel};
 use proto::proto::Message;
 use raft::{InitialConfig, Node, ValidNodeId};
 
+pub fn basic_cluster() -> Vec<Node<MemStorage, TestChannel>> {
+    cluster_from_config(initial_config(7))
+}
+
 pub fn initial_config(size: u64) -> InitialConfig {
     InitialConfig {
         id: ValidNodeId(NonZeroU64::new(1).unwrap()),
         cluster_size: size,
-        min_ticks_before_election: NonZeroU64::new(100).unwrap(),
-        max_ticks_before_election: NonZeroU64::new(200).unwrap(),
-        ticks_between_heartbeats: NonZeroU64::new(10).unwrap(),
+        min_ticks_before_election: NonZeroU64::new(10).unwrap(),
+        max_ticks_before_election: NonZeroU64::new(20).unwrap(),
+        ticks_between_heartbeats: NonZeroU64::new(1).unwrap(),
         last_applied_idx: None,
     }
 }
@@ -46,9 +50,11 @@ pub fn test_channels_from_cluster_size(size: u64) -> Vec<TestChannel> {
     let recv_channels: Vec<_> = channels.into_iter().map(|(_, recv)| recv).collect();
     let node_channels: Vec<_> = recv_channels
         .into_iter()
-        .map(|recv| TestChannel {
+        .enumerate()
+        .map(|(id, recv)| TestChannel {
             channels: send_channels.clone(),
             recv,
+            id: id as u64,
         })
         .collect();
 

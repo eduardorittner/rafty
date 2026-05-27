@@ -15,14 +15,14 @@ pub struct Node<Store: Storage, Chan: Channel> {
     pub term: u64,
 
     // Which peer this node voted for.
-    pub vote: NodeId,
+    pub voted_for: NodeId,
 
     // Current term leader.
     pub leader_id: NodeId,
 
     pub role: Role,
 
-    config: InitialConfig,
+    pub config: InitialConfig,
 
     // Raft persisted log store.
     storage: Store,
@@ -34,7 +34,7 @@ pub struct Node<Store: Storage, Chan: Channel> {
     /// becomes a candidate and starts a new election. This value is a random value
     /// set at the start of an election inside the range ([max_election_timeout],
     /// [min_election_timeout])
-    election_timeout: u64,
+    pub election_timeout: u64,
 }
 
 /// A (potentially invalid) node id.
@@ -79,10 +79,19 @@ impl Role {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy, Default)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub struct FollowerState {
-    promotable: bool,
-    ticks_since_last_msg: u64,
+    pub promotable: bool,
+    pub ticks_since_last_msg: u64,
+}
+
+impl Default for FollowerState {
+    fn default() -> Self {
+        Self {
+            promotable: true,
+            ticks_since_last_msg: Default::default(),
+        }
+    }
 }
 
 impl FollowerState {
@@ -106,7 +115,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     pub fn new(id: ValidNodeId, storage: Store, channel: Chan, config: InitialConfig) -> Self {
         let mut node = Self {
             id: id.into(),
-            vote: INVALID_ID,
+            voted_for: INVALID_ID,
             leader_id: INVALID_ID,
             role: Role::Follower(FollowerState::default()),
             term: 0,
@@ -168,7 +177,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     }
 
     pub fn start_term(&mut self) {
-        self.vote = INVALID_ID;
+        self.voted_for = self.id;
         self.leader_id = INVALID_ID;
         self.generate_random_election_timeout();
     }

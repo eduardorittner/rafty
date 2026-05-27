@@ -7,7 +7,7 @@ const TEST_CLUSTER_SIZE: u64 = 7;
 /// Makes sure that node channels are correctly configured. This is more of a test of the methods
 /// in the `utils` module.
 #[test]
-fn test_inter_node_communication() {
+fn inter_node_communication() {
     let heartbeat = |from, to| Message {
         msg_type: MessageType::Heartbeat.into(),
         to,

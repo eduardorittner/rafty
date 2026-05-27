@@ -9,6 +9,7 @@ pub struct TestChannel {
     /// Channels for sending to other nodes, `channels[self.id]` is a sender to its own `recv`.
     pub channels: Vec<Sender<Message>>,
     pub recv: Receiver<Message>,
+    pub id: u64,
 }
 
 impl Channel for TestChannel {
@@ -20,11 +21,17 @@ impl Channel for TestChannel {
         channel.send(msg).expect("Write to test channel failed.");
     }
 
+    /// Sends messages to everyone except itself
     fn broadcast(&mut self, msg: Message) {
-        self.channels.iter_mut().for_each(|sender| {
-            sender
-                .send(msg.clone())
-                .expect("Write to test channel (broadcast) failed.")
-        });
+        self.channels
+            .iter_mut()
+            .enumerate()
+            .filter(|(id, _)| *id != self.id as usize)
+            .map(|(_, sender)| sender)
+            .for_each(|sender| {
+                sender
+                    .send(msg.clone())
+                    .expect("Write to test channel (broadcast) failed.")
+            });
     }
 }

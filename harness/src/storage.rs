@@ -21,10 +21,14 @@ impl Storage for MemStorage {
     }
 
     fn term(&self, idx: u64) -> Result<u64> {
-        self.log
-            .get(idx as usize)
-            .map(|entry| entry.term)
-            .ok_or(Error::InvalidIdx(idx))
+        if idx == 0 && self.log.is_empty() {
+            Ok(0)
+        } else {
+            self.log
+                .get(idx as usize)
+                .map(|entry| entry.term)
+                .ok_or(Error::InvalidIdx(idx))
+        }
     }
 
     fn entries(&self, low: u64, high: u64) -> Result<Vec<Entry>> {
