@@ -9,6 +9,11 @@ pub trait Storage {
     /// Returns the term of entry with index `idx`.
     fn term(&self, idx: u64) -> Result<u64>;
 
+    /// Term of the last entry replicated in `Storage`.
+    fn last_term(&self) -> u64 {
+        self.term(self.last_index()).unwrap()
+    }
+
     /// Returns a slice of log entries in the range `[low, high)`.
     fn entries(&self, low: u64, high: u64) -> Result<Vec<Entry>>;
 

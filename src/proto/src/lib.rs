@@ -129,6 +129,7 @@ pub mod proto {
                         to,
                         from,
                         voted_for: value.voted_for,
+                        term,
                     })
                 }
             }
@@ -210,5 +211,6 @@ pub mod proto {
         pub to: u64,
         pub from: u64,
         pub voted_for: u64,
+        pub term: u64,
     }
 }

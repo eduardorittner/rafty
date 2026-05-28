@@ -15,6 +15,13 @@ pub enum Vote {
     Against,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ElectionState {
+    Won,
+    Lost,
+    Pending,
+}
+
 impl Quorum {
     pub fn new(cluster_size: u64, id: u64) -> Quorum {
         let mut quorum = Quorum {
@@ -31,11 +38,29 @@ impl Quorum {
         )
     }
 
-    pub fn has_majority(&self) -> bool {
+    pub fn votes_against(&self) -> usize {
+        self.voters.iter().fold(
+            0,
+            |acc, vote| if *vote == Vote::Against { acc + 1 } else { acc },
+        )
+    }
+
+    pub fn has_majority_for(&self) -> bool {
         self.votes_for() > self.voters.len() / 2
     }
 
-    pub fn set(&mut self, id: u64, vote: Vote) {
+    pub fn has_majority_against(&self) -> bool {
+        self.votes_against() > self.voters.len() / 2
+    }
+
+    pub fn set(&mut self, id: u64, vote: Vote) -> ElectionState {
         *self.voters.get_mut(id as usize).unwrap() = vote;
+        if self.has_majority_for() {
+            ElectionState::Won
+        } else if self.has_majority_against() {
+            ElectionState::Lost
+        } else {
+            ElectionState::Pending
+        }
     }
 }

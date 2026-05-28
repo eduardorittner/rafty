@@ -1,12 +1,14 @@
+use std::fmt::Display;
 use std::num::NonZeroU64;
 
 use crate::communication::Channel;
-use crate::quorum::Quorum;
+use crate::quorum::{Quorum, Vote};
 use crate::storage::Storage;
+use crate::{Error, RaftLog};
 use crate::{config::InitialConfig, error::Result};
 use proto::proto::*;
 use rand::RngExt;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 #[derive(Debug)]
 pub struct Node<Store: Storage, Chan: Channel> {
@@ -19,11 +21,12 @@ pub struct Node<Store: Storage, Chan: Channel> {
     pub leader_id: NodeId,
     /// Node's current role state
     pub role: Role,
+    /// Cluster's initial configuration
     pub config: InitialConfig,
     /// Raft persisted log store.
     // TODO: we should add an intermediate `RaftLog<T: Storage>` which uses the underlying storage
     // so we can reuse most of the raft log logic independently from the backing store
-    storage: Store,
+    storage: RaftLog<Store>,
     /// Channel for sending messages
     pub channel: Chan,
     /// If a follower does not receive any message in [election_timeout] ticks, it
@@ -39,12 +42,36 @@ pub struct Node<Store: Storage, Chan: Channel> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct NodeId(Option<NonZeroU64>);
 
+impl Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(id) => {
+                write!(f, "[{}]", id.get())
+            }
+            None => {
+                write!(f, "invalid node id")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ValidNodeId(pub NonZeroU64);
 
 impl From<ValidNodeId> for NodeId {
     fn from(value: ValidNodeId) -> NodeId {
         NodeId(Some(value.0))
+    }
+}
+
+impl TryFrom<NodeId> for ValidNodeId {
+    type Error = Error;
+
+    fn try_from(value: NodeId) -> Result<Self> {
+        match value.0 {
+            Some(val) => Ok(ValidNodeId(val)),
+            None => Err(Error::InvalidNodeId),
+        }
     }
 }
 
@@ -56,11 +83,17 @@ impl From<NodeId> for u64 {
     }
 }
 
+impl From<ValidNodeId> for u64 {
+    fn from(value: ValidNodeId) -> Self {
+        value.0.get()
+    }
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Role {
     Follower(FollowerState),
     Candidate(CandidateState),
-    Leader,
+    Leader(LeaderState),
 }
 
 impl Role {
@@ -70,7 +103,7 @@ impl Role {
             Role::Follower(_) | Role::Candidate(_) => {
                 Role::Candidate(CandidateState::new(cluster_size, id))
             }
-            Role::Leader => {
+            Role::Leader(_) => {
                 unreachable!("Invalid state transition: [leader -> candidate]");
             }
         }
@@ -80,8 +113,17 @@ impl Role {
     fn become_leader(self) -> Role {
         match self {
             Role::Follower(_) => panic!("Invalid state transition: [follower -> leader]"),
-            Role::Candidate(_) => Role::Leader,
-            Role::Leader => panic!("Invalid state transition: [leader -> leader]"),
+            Role::Candidate(_) => Role::Leader(LeaderState::default()),
+            Role::Leader(_) => panic!("Invalid state transition: [leader -> leader]"),
+        }
+    }
+
+    #[inline]
+    fn become_follower(self) -> Role {
+        match self {
+            Role::Follower(_) | Role::Candidate(_) | Role::Leader(_) => {
+                Role::Follower(FollowerState::default())
+            }
         }
     }
 }
@@ -125,6 +167,11 @@ impl CandidateState {
     }
 }
 
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct LeaderState {
+    ticks_since_last_heartbeat: u64,
+}
+
 impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     pub fn new(id: ValidNodeId, storage: Store, channel: Chan, config: InitialConfig) -> Self {
         let mut node = Self {
@@ -135,7 +182,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             term: 0,
             election_timeout: 0,
             config,
-            storage,
+            storage: RaftLog::from_store(storage),
             channel,
         };
         node.generate_random_election_timeout();
@@ -150,7 +197,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             Message::Append(_) => todo!(),
             Message::AppendResponse(_) => todo!(),
             Message::RequestVote(m) => self.step_vote_request(m),
-            Message::RequestVoteResponse(_) => todo!(),
+            Message::RequestVoteResponse(m) => self.step_vote_response(m),
         }
         Ok(())
     }
@@ -173,25 +220,32 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                     return;
                 }
 
-                if state.votes.has_majority() {
-                    self.role = self.role.to_owned().become_leader();
-                    self.start_term();
-                    self.leader_id = self.id;
+                if state.votes.has_majority_for() {
+                    self.become_leader()
                 }
             }
-            Role::Leader => todo!(),
+            Role::Leader(LeaderState {
+                ticks_since_last_heartbeat,
+            }) => {
+                if *ticks_since_last_heartbeat >= self.config.ticks_between_heartbeats.get() {
+                    self.broadcast_heartbeats();
+                }
+            }
         }
     }
 
     fn broadcast_heartbeats(&mut self) {
-        self.channel.broadcast(Message::Heartbeat(Heartbeat {
-            to: ,
-            from: (),
-            term: (),
-            commit: (),
-            last_index: (),
-            last_term: (),
-        }));
+        self.channel.broadcast(
+            Message::Heartbeat(Heartbeat {
+                to: INVALID_ID.into(),
+                from: self.id.into(),
+                term: self.term,
+                commit: self.storage.committed,
+                last_index: self.storage.store.last_index(),
+                last_term: self.storage.store.last_term(),
+            })
+            .into(),
+        );
         todo!()
     }
 
@@ -217,9 +271,53 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     }
 
     fn step_vote_request(&mut self, req: RequestVote) {
-        if req.candidate_term < self.term {}
+        if req.candidate_term < self.term {
+            self.send_vote_response(INVALID_ID.into(), req.from);
+            return;
+        }
 
-        todo!()
+        let vote = if req.candidate_term < self.term {
+            INVALID_ID.into()
+        } else {
+            match self.voted_for.0 {
+                Some(vote) => vote.into(),
+                None => req.from,
+            }
+        };
+
+        self.send_vote_response(vote, req.from);
+    }
+
+    fn step_vote_response(&mut self, req: RequestVoteResponse) {
+        if req.term != self.term {
+            info!(
+                "Node {} received stale VoteResponse: current term {}, response term {}",
+                self.id, self.term, req.term
+            );
+            return;
+        }
+        match &mut self.role {
+            Role::Follower(_) | Role::Leader(_) => {
+                error!("Received vote response when not a candidate")
+            }
+            Role::Candidate(state) => {
+                let vote = if req.voted_for == self.id.into() {
+                    Vote::For
+                } else {
+                    Vote::Against
+                };
+
+                match state.votes.set(req.from, vote) {
+                    crate::quorum::ElectionState::Won => {
+                        self.role = self.role.to_owned().become_leader()
+                    }
+                    crate::quorum::ElectionState::Lost => {
+                        self.role = self.role.to_owned().become_follower()
+                    }
+                    crate::quorum::ElectionState::Pending => (),
+                }
+            }
+        }
     }
 
     pub fn generate_random_election_timeout(&mut self) {
@@ -235,25 +333,28 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     }
 
     fn broadcast_request_vote(&self) -> RequestVote {
-        let last_index = self.storage.last_index();
+        let last_index = self.storage.store.last_index();
         RequestVote {
             to: INVALID_ID.into(),
             from: self.id.into(),
             candidate_term: self.term,
             last_index: last_index,
-            last_term: self.storage.term(last_index).unwrap(),
+            last_term: self.storage.store.term(last_index).unwrap(),
         }
     }
 
-    fn new_heartbeat_message(&self) -> Heartbeat {
-        let last_index = self.storage.last_index();
-        Heartbeat {
-            to: INVALID_ID.into(),
+    fn send_vote_response(&mut self, vote_for: u64, to: u64) -> RequestVoteResponse {
+        RequestVoteResponse {
+            to,
             from: self.id.into(),
-            term: self.term,
-            last_index: last_index,
-            last_term: self.storage.term(last_index).unwrap(),
-            commit: todo!(),
+            voted_for: vote_for,
+            term: self.storage.store.last_term(),
         }
+    }
+
+    fn become_leader(&mut self) {
+        self.role = self.role.to_owned().become_leader();
+        self.start_term();
+        self.leader_id = self.id;
     }
 }
