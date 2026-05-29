@@ -36,3 +36,42 @@ fn start_campaign() {
         );
     }
 }
+
+#[test]
+fn elect_leader() {
+    let mut nodes = basic_cluster();
+
+    let mut candidate = nodes.remove(0);
+
+    for _ in 0..candidate.election_timeout {
+        candidate.tick();
+    }
+
+    // After `election_timeout` ticks, becomes a candidate
+    assert!(matches!(candidate.role, Role::Candidate(_)));
+    assert_eq!(candidate.id, candidate.voted_for);
+
+    for mut node in nodes {
+        let vote_request = node
+            .channel
+            .recv
+            .try_recv()
+            .expect("Node should have received a RequestVote message.");
+
+        // respond to vote request
+        node.step(vote_request.into()).unwrap();
+        candidate
+            .step(
+                candidate
+                    .channel
+                    .recv
+                    .try_recv()
+                    .expect("Candidate should have received vote response")
+                    .into(),
+            )
+            .unwrap();
+    }
+
+    // Candidate should have become leader
+    assert!(matches!(candidate.role, Role::Leader(_)));
+}
