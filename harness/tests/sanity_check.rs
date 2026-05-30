@@ -1,6 +1,7 @@
 use harness::utils::{self, initial_config};
 use proto::proto::{Heartbeat, Message};
 use raft::Channel;
+use test_log::test;
 
 const TEST_CLUSTER_SIZE: u64 = 7;
 

@@ -1,6 +1,7 @@
 use harness::utils::basic_cluster;
 use proto::proto::{ProtoMessage, ProtoMessageType};
 use raft::{INVALID_ID, Role};
+use test_log::test;
 
 #[test]
 fn start_campaign() {

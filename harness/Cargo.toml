@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 raft = { path = "../src/raft" }
 proto = { path = "../src/proto" }
+test-log = { version = "0.2.20", default-features = false, features = ["trace"] }
