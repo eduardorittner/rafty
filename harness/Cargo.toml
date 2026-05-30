@@ -7,3 +7,4 @@ edition = "2024"
 raft = { path = "../src/raft" }
 proto = { path = "../src/proto" }
 test-log = { version = "0.2.20", default-features = false, features = ["trace"] }
+rand = "0.10.1"

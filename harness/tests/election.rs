@@ -1,4 +1,7 @@
-use harness::utils::basic_cluster;
+use harness::{
+    ONLY_FAULT,
+    utils::{basic_cluster, basic_cluster_with_drop_rate},
+};
 use proto::proto::{ProtoMessage, ProtoMessageType};
 use raft::{INVALID_ID, Role};
 use test_log::test;
@@ -119,4 +122,42 @@ fn elect_leader_right_after_majority() {
             assert!(matches!(candidate.role, Role::Leader(_)));
         }
     }
+}
+
+#[test]
+fn leader_not_elected_with_one_vote() {
+    let mut nodes = basic_cluster_with_drop_rate(ONLY_FAULT);
+
+    let mut candidate = nodes.remove(0);
+
+    for _ in 0..candidate.election_timeout {
+        candidate.tick();
+    }
+
+    // After `election_timeout` ticks, becomes a candidate
+    assert!(matches!(candidate.role, Role::Candidate(_)));
+    assert_eq!(candidate.id, candidate.voted_for);
+
+    for node in nodes.into_iter() {
+        let msg = node.channel.recv.try_recv();
+        // No node should receive any messages
+        assert!(msg.is_err());
+    }
+
+    let last_term = candidate.term;
+
+    // Candidate should still be candidate
+    match &candidate.role {
+        Role::Follower(_) | Role::Leader(_) => panic!("Candidate should still be candidate"),
+        Role::Candidate(state) => {
+            assert_eq!(1, state.votes.votes_for());
+            assert_eq!(0, state.votes.votes_against());
+        }
+    };
+
+    for _ in 0..candidate.election_timeout {
+        candidate.tick();
+    }
+
+    assert_eq!(last_term + 1, candidate.term);
 }

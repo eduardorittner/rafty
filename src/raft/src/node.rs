@@ -151,8 +151,8 @@ impl FollowerState {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct CandidateState {
-    ticks_since_election_start: u64,
-    votes: Quorum,
+    pub ticks_since_election_start: u64,
+    pub votes: Quorum,
 }
 
 impl CandidateState {

@@ -1,4 +1,7 @@
-use harness::utils::{self, initial_config};
+use harness::{
+    NO_FAULT,
+    utils::{self, initial_config},
+};
 use proto::proto::{Heartbeat, Message};
 use raft::Channel;
 use test_log::test;
@@ -20,7 +23,7 @@ fn inter_node_communication() {
         })
         .into()
     };
-    let mut nodes = utils::cluster_from_config(initial_config(TEST_CLUSTER_SIZE));
+    let mut nodes = utils::cluster_from_config(initial_config(TEST_CLUSTER_SIZE), NO_FAULT);
 
     for from in 1..=TEST_CLUSTER_SIZE {
         for to in 1..=TEST_CLUSTER_SIZE {

@@ -1,11 +1,15 @@
 use std::{num::NonZeroU64, sync::mpsc::channel};
 
-use crate::{MemStorage, TestChannel};
+use crate::{FaultRate, FaultyChannel, MemStorage, NO_FAULT, TestChannel};
 use proto::proto::ProtoMessage;
 use raft::{InitialConfig, Node, ValidNodeId};
 
 pub fn basic_cluster() -> Vec<Node<MemStorage, TestChannel>> {
-    cluster_from_config(initial_config(7))
+    cluster_from_config(initial_config(7), NO_FAULT)
+}
+
+pub fn basic_cluster_with_drop_rate(drop_rate: FaultRate) -> Vec<Node<MemStorage, TestChannel>> {
+    cluster_from_config(initial_config(7), drop_rate)
 }
 
 pub fn initial_config(size: u64) -> InitialConfig {
@@ -20,8 +24,11 @@ pub fn initial_config(size: u64) -> InitialConfig {
 }
 
 /// Creates a new cluster based on `config`
-pub fn cluster_from_config(config: InitialConfig) -> Vec<Node<MemStorage, TestChannel>> {
-    let channels = test_channels_from_cluster_size(config.cluster_size);
+pub fn cluster_from_config(
+    config: InitialConfig,
+    drop_rate: FaultRate,
+) -> Vec<Node<MemStorage, TestChannel>> {
+    let channels = test_channels_from_cluster_size(config.cluster_size, drop_rate);
     let nodes: Vec<_> = channels
         .into_iter()
         .enumerate()
@@ -38,7 +45,7 @@ pub fn cluster_from_config(config: InitialConfig) -> Vec<Node<MemStorage, TestCh
     nodes
 }
 
-pub fn test_channels_from_cluster_size(size: u64) -> Vec<TestChannel> {
+pub fn test_channels_from_cluster_size(size: u64, drop_rate: FaultRate) -> Vec<TestChannel> {
     let channels: Vec<_> = std::iter::repeat_n(None, size as usize)
         .map(|_: Option<u64>| channel::<ProtoMessage>())
         .collect();
@@ -52,7 +59,10 @@ pub fn test_channels_from_cluster_size(size: u64) -> Vec<TestChannel> {
         .into_iter()
         .enumerate()
         .map(|(id, recv)| TestChannel {
-            channels: send_channels.clone(),
+            channels: send_channels
+                .iter()
+                .map(|send| FaultyChannel::new(send, drop_rate))
+                .collect(),
             recv,
             id: id as u64,
         })
