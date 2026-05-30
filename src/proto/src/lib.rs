@@ -76,6 +76,7 @@ pub mod proto {
                     to: m.to,
                     from: m.from,
                     voted_for: m.voted_for,
+                    term: m.term,
                     ..Default::default()
                 },
                 Message::StartCampaign => {

@@ -271,11 +271,6 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     }
 
     fn step_vote_request(&mut self, req: RequestVote) {
-        if req.candidate_term < self.term {
-            self.send_vote_response(INVALID_ID.into(), req.from);
-            return;
-        }
-
         let vote = if req.candidate_term < self.term {
             INVALID_ID.into()
         } else {
@@ -285,7 +280,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             }
         };
 
-        self.send_vote_response(vote, req.from);
+        self.send_vote_response(vote, req.from, req.candidate_term);
     }
 
     fn step_vote_response(&mut self, req: RequestVoteResponse) {
@@ -343,13 +338,16 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         }
     }
 
-    fn send_vote_response(&mut self, vote_for: u64, to: u64) -> RequestVoteResponse {
-        RequestVoteResponse {
-            to,
-            from: self.id.into(),
-            voted_for: vote_for,
-            term: self.storage.store.last_term(),
-        }
+    fn send_vote_response(&mut self, vote_for: u64, to: u64, term: u64) {
+        self.channel.send(
+            Message::RequestVoteResponse(RequestVoteResponse {
+                to,
+                from: self.id.into(),
+                voted_for: vote_for,
+                term,
+            })
+            .into(),
+        );
     }
 
     fn become_leader(&mut self) {

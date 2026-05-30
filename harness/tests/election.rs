@@ -60,6 +60,7 @@ fn elect_leader() {
 
         // respond to vote request
         node.step(vote_request.into()).unwrap();
+
         candidate
             .step(
                 candidate

@@ -15,6 +15,7 @@ pub struct TestChannel {
 impl Channel for TestChannel {
     fn send(&mut self, msg: ProtoMessage) {
         assert!(msg.to > 0);
+        println!("sendin");
         let to = msg.to;
         let channel = &mut self.channels[to as usize - 1];
 
@@ -23,6 +24,7 @@ impl Channel for TestChannel {
 
     /// Sends messages to everyone except itself
     fn broadcast(&mut self, msg: ProtoMessage) {
+        println!("broadcasting");
         self.channels
             .iter_mut()
             .enumerate()
