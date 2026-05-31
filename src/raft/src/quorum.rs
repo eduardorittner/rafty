@@ -54,7 +54,7 @@ impl Quorum {
     }
 
     pub fn set(&mut self, id: u64, vote: Vote) -> ElectionState {
-        *self.voters.get_mut(id as usize).unwrap() = vote;
+        *self.voters.get_mut(id as usize - 1).unwrap() = vote;
         if self.has_majority_for() {
             ElectionState::Won
         } else if self.has_majority_against() {

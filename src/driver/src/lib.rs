@@ -2,12 +2,26 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, SocketAddr};
 use std::sync::{Arc, Mutex, mpsc};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use prost::Message as _;
 use proto::proto::ProtoMessage;
 use raft::{Channel, Node, Storage, InitialConfig, ValidNodeId};
+
+/// Events emitted by the driver for tracking and visualization.
+#[derive(Debug, Clone)]
+pub enum DriverEvent {
+    MessageSent(ProtoMessage),
+    MessageReceived(ProtoMessage),
+    StateChanged {
+        id: u64,
+        term: u64,
+        voted_for: u64,
+        leader_id: u64,
+        role: String,
+    },
+}
 
 /// Reads a length-prefixed `ProtoMessage` from a reader.
 /// Framing format: [ 4-byte length prefix (big-endian u32) | Protobuf Payload ]
@@ -43,10 +57,14 @@ pub fn write_framed_message<W: Write>(writer: &mut W, msg: &ProtoMessage) -> std
 #[derive(Clone)]
 pub struct DriverChannel {
     active_connections: Arc<Mutex<HashMap<u64, TcpStream>>>,
+    event_tx: Option<mpsc::Sender<DriverEvent>>,
 }
 
 impl Channel for DriverChannel {
     fn send(&mut self, msg: ProtoMessage) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(DriverEvent::MessageSent(msg.clone()));
+        }
         let to = msg.to;
         let mut active = self.active_connections.lock().unwrap();
         if let Some(stream) = active.get_mut(&to) {
@@ -65,6 +83,9 @@ impl Channel for DriverChannel {
         for (&peer_id, stream) in active.iter_mut() {
             let mut msg_copy = msg.clone();
             msg_copy.to = peer_id;
+            if let Some(ref tx) = self.event_tx {
+                let _ = tx.send(DriverEvent::MessageSent(msg_copy.clone()));
+            }
             if let Err(e) = write_framed_message(stream, &msg_copy) {
                 tracing::error!("Failed to broadcast message to peer {}: {}", peer_id, e);
                 failed_peers.push(peer_id);
@@ -81,10 +102,13 @@ impl Channel for DriverChannel {
 pub struct RaftDriver<Store: Storage> {
     pub node: Node<Store, DriverChannel>,
     receiver: mpsc::Receiver<ProtoMessage>,
-    shutdown: Arc<AtomicBool>,
+    pub shutdown: Arc<AtomicBool>,
+    pub paused: Arc<AtomicBool>,
+    pub tick_interval_ms: Arc<AtomicU64>,
     peer_threads: Vec<std::thread::JoinHandle<()>>,
     listener_thread: Option<std::thread::JoinHandle<()>>,
     local_addr: SocketAddr,
+    event_tx: Option<mpsc::Sender<DriverEvent>>,
 }
 
 impl<Store: Storage> RaftDriver<Store> {
@@ -96,10 +120,13 @@ impl<Store: Storage> RaftDriver<Store> {
         listen_addr: &str,
         storage: Store,
         config: InitialConfig,
+        event_tx: Option<mpsc::Sender<DriverEvent>>,
     ) -> std::io::Result<Self> {
         let active_connections = Arc::new(Mutex::new(HashMap::new()));
         let (sender, receiver) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let tick_interval_ms = Arc::new(AtomicU64::new(10)); // Default to 10ms
         
         // Bind the TCP listener for incoming connections from peer nodes.
         let listener = TcpListener::bind(listen_addr)?;
@@ -108,6 +135,8 @@ impl<Store: Storage> RaftDriver<Store> {
         // Spawn listener thread for incoming connections
         let sender_clone = sender.clone();
         let shutdown_clone = Arc::clone(&shutdown);
+        let paused_clone = Arc::clone(&paused);
+        let event_tx_clone = event_tx.clone();
         let listener_thread = std::thread::spawn(move || {
             listener.set_nonblocking(true).unwrap_or(());
             
@@ -126,12 +155,21 @@ impl<Store: Storage> RaftDriver<Store> {
                         };
                         let s = sender_clone.clone();
                         let sh = Arc::clone(&shutdown_clone);
+                        let p = Arc::clone(&paused_clone);
+                        let etx = event_tx_clone.clone();
                         std::thread::spawn(move || {
                             read_stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap_or(());
                             
                             while !sh.load(Ordering::Relaxed) {
                                 match read_framed_message(&mut read_stream) {
                                     Ok(msg) => {
+                                        // Ignore messages if paused
+                                        if p.load(Ordering::Relaxed) {
+                                            continue;
+                                        }
+                                        if let Some(ref tx) = etx {
+                                            let _ = tx.send(DriverEvent::MessageReceived(msg.clone()));
+                                        }
                                         if let Err(_) = s.send(msg) {
                                             break; // Receiver disconnected
                                         }
@@ -164,6 +202,8 @@ impl<Store: Storage> RaftDriver<Store> {
             let active_connections_clone = Arc::clone(&active_connections);
             let s = sender.clone();
             let sh = Arc::clone(&shutdown);
+            let p = Arc::clone(&paused);
+            let etx = event_tx.clone();
             let handle = std::thread::spawn(move || {
                 while !sh.load(Ordering::Relaxed) {
                     tracing::debug!("Attempting to connect to peer {} at {}", peer_id, peer_addr);
@@ -193,6 +233,13 @@ impl<Store: Storage> RaftDriver<Store> {
                             while !sh.load(Ordering::Relaxed) {
                                 match read_framed_message(&mut read_stream) {
                                     Ok(msg) => {
+                                        // Ignore messages if paused
+                                        if p.load(Ordering::Relaxed) {
+                                            continue;
+                                        }
+                                        if let Some(ref tx) = etx {
+                                            let _ = tx.send(DriverEvent::MessageReceived(msg.clone()));
+                                        }
                                         if let Err(_) = s.send(msg) {
                                             break; // Receiver disconnected
                                         }
@@ -235,6 +282,7 @@ impl<Store: Storage> RaftDriver<Store> {
         
         let channel = DriverChannel {
             active_connections: Arc::clone(&active_connections),
+            event_tx: event_tx.clone(),
         };
         
         let node = Node::new(valid_id, storage, channel, config);
@@ -243,9 +291,12 @@ impl<Store: Storage> RaftDriver<Store> {
             node,
             receiver,
             shutdown,
+            paused,
+            tick_interval_ms,
             peer_threads,
             listener_thread: Some(listener_thread),
             local_addr,
+            event_tx,
         })
     }
     
@@ -259,14 +310,60 @@ impl<Store: Storage> RaftDriver<Store> {
         self.shutdown.store(true, Ordering::Relaxed);
     }
     
+    fn get_state_event(&self) -> DriverEvent {
+        DriverEvent::StateChanged {
+            id: u64::from(self.node.id),
+            term: self.node.term,
+            voted_for: u64::from(self.node.voted_for),
+            leader_id: u64::from(self.node.leader_id),
+            role: match &self.node.role {
+                raft::Role::Follower(_) => "Follower".to_string(),
+                raft::Role::Candidate(_) => "Candidate".to_string(),
+                raft::Role::Leader(_) => "Leader".to_string(),
+            },
+        }
+    }
+    
     /// Starts the main event loop.
-    /// Blocks the current thread, ticking the state machine every 10ms
+    /// Blocks the current thread, ticking the state machine every `tick_interval_ms`
     /// and immediately passing any received network messages to `node.step()`.
     pub fn run(mut self) -> raft::Result<()> {
-        let tick_interval = Duration::from_millis(10);
+        let mut last_tick_ms = self.tick_interval_ms.load(Ordering::Relaxed);
+        let mut tick_interval = Duration::from_millis(last_tick_ms);
         let mut next_tick = Instant::now() + tick_interval;
         
+        let mut last_term = self.node.term;
+        let mut last_role = match &self.node.role {
+            raft::Role::Follower(_) => 0,
+            raft::Role::Candidate(_) => 1,
+            raft::Role::Leader(_) => 2,
+        };
+        let mut last_voted_for = u64::from(self.node.voted_for);
+        let mut last_leader_id = u64::from(self.node.leader_id);
+
+        // Send initial state event
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(self.get_state_event());
+        }
+
         while !self.shutdown.load(Ordering::Relaxed) {
+            // Simulated crash/partition behavior
+            if self.paused.load(Ordering::Relaxed) {
+                // Drain any incoming messages in the channel to simulate packet loss while offline
+                while let Ok(_) = self.receiver.try_recv() {}
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+
+            // Check if tick rate has changed dynamically
+            let current_tick_ms = self.tick_interval_ms.load(Ordering::Relaxed);
+            if current_tick_ms != last_tick_ms {
+                last_tick_ms = current_tick_ms;
+                tick_interval = Duration::from_millis(current_tick_ms);
+                // Reset next tick deadline relative to now
+                next_tick = Instant::now() + tick_interval;
+            }
+
             let now = Instant::now();
             let timeout = if next_tick > now {
                 next_tick - now
@@ -302,6 +399,30 @@ impl<Store: Storage> RaftDriver<Store> {
                 next_tick += tick_interval;
                 if next_tick < now {
                     next_tick = now + tick_interval;
+                }
+            }
+
+            // Check if state changed, and emit StateChanged event if so
+            let current_role = match &self.node.role {
+                raft::Role::Follower(_) => 0,
+                raft::Role::Candidate(_) => 1,
+                raft::Role::Leader(_) => 2,
+            };
+            let current_voted_for = u64::from(self.node.voted_for);
+            let current_leader_id = u64::from(self.node.leader_id);
+            
+            if self.node.term != last_term 
+                || current_role != last_role 
+                || current_voted_for != last_voted_for 
+                || current_leader_id != last_leader_id 
+            {
+                last_term = self.node.term;
+                last_role = current_role;
+                last_voted_for = current_voted_for;
+                last_leader_id = current_leader_id;
+                
+                if let Some(ref tx) = self.event_tx {
+                    let _ = tx.send(self.get_state_event());
                 }
             }
         }
@@ -383,7 +504,7 @@ mod tests {
         let storage = TestStorage { last_index: 0 };
         let peers = HashMap::new();
         
-        let driver = RaftDriver::new(1, peers, "127.0.0.1:0", storage, config).unwrap();
+        let driver = RaftDriver::new(1, peers, "127.0.0.1:0", storage, config, None).unwrap();
         let _addr = driver.local_addr();
 
         // Run the driver in a background thread and then shut it down

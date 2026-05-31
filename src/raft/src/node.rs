@@ -58,6 +58,16 @@ impl Display for NodeId {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ValidNodeId(pub NonZeroU64);
 
+impl From<u64> for NodeId {
+    fn from(value: u64) -> NodeId {
+        if value == 0 {
+            NodeId(None)
+        } else {
+            NodeId(Some(NonZeroU64::new(value).unwrap()))
+        }
+    }
+}
+
 impl From<ValidNodeId> for NodeId {
     fn from(value: ValidNodeId) -> NodeId {
         NodeId(Some(value.0))
@@ -193,7 +203,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     pub fn step(&mut self, msg: Message) -> Result<()> {
         match msg {
             Message::StartCampaign => self.start_campaign(),
-            Message::Heartbeat(_) => todo!(),
+            Message::Heartbeat(m) => self.step_heartbeat(m),
             Message::Append(_) => todo!(),
             Message::AppendResponse(_) => todo!(),
             Message::RequestVote(m) => self.step_vote_request(m),
@@ -227,6 +237,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             Role::Leader(LeaderState {
                 ticks_since_last_heartbeat,
             }) => {
+                *ticks_since_last_heartbeat += 1;
                 if *ticks_since_last_heartbeat >= self.config.ticks_between_heartbeats.get() {
                     self.broadcast_heartbeats();
                 }
@@ -246,7 +257,6 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             })
             .into(),
         );
-        todo!()
     }
 
     /// Start a campaign to attempt to become a leader.
@@ -268,6 +278,48 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         self.voted_for = self.id;
         self.leader_id = INVALID_ID;
         self.generate_random_election_timeout();
+    }
+
+    fn step_heartbeat(&mut self, req: Heartbeat) {
+        match &mut self.role {
+            Role::Follower(state) => {
+                if self.term > req.term {
+                    error!(
+                        "[{}] at term {} received heartbeat with term {}",
+                        self.id, self.term, req.term
+                    );
+                } else {
+                    state.ticks_since_last_msg = 0;
+
+                    let from = req.from.into();
+                    if self.leader_id != from {
+                        info!(
+                            "[{}] changed leader from {} to {}",
+                            self.id, self.leader_id, from
+                        );
+                        self.leader_id = from;
+                    }
+                    self.send_heartbeat_response();
+                }
+            }
+            Role::Candidate(_) => {
+                if self.term > req.term {
+                    error!(
+                        "[{}] at term {} received heartbeat with term {}",
+                        self.id, self.term, req.term
+                    );
+                } else {
+                    self.role = self.role.to_owned().become_follower();
+                    self.leader_id = req.from.into();
+                    info!(
+                        "[{}] was candidate, became follower of {}",
+                        self.id, self.leader_id
+                    );
+                    self.send_heartbeat_response();
+                }
+            }
+            Role::Leader(_) => {}
+        }
     }
 
     fn step_vote_request(&mut self, req: RequestVote) {
@@ -336,6 +388,20 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             last_index: last_index,
             last_term: self.storage.store.term(last_index).unwrap(),
         }
+    }
+
+    fn send_heartbeat_response(&mut self) {
+        self.channel.send(
+            Message::Heartbeat(Heartbeat {
+                to: self.leader_id.into(),
+                from: self.id.into(),
+                term: self.term,
+                commit: self.storage.committed,
+                last_index: self.storage.store.last_index(),
+                last_term: self.storage.store.last_term(),
+            })
+            .into(),
+        );
     }
 
     fn send_vote_response(&mut self, vote_for: u64, to: u64, term: u64) {
