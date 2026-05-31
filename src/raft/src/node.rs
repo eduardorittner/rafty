@@ -318,7 +318,17 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                     self.send_heartbeat_response();
                 }
             }
-            Role::Leader(_) => {}
+            Role::Leader(_) => {
+                if self.term < req.term {
+                    self.role = self.role.to_owned().become_follower();
+                    self.leader_id = req.from.into();
+                    info!(
+                        "[{}] was leader, became follower of {}",
+                        self.id, self.leader_id
+                    );
+                    self.send_heartbeat_response();
+                }
+            }
         }
     }
 

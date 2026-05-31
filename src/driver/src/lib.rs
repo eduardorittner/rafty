@@ -1,13 +1,12 @@
-use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, SocketAddr};
-use std::sync::{Arc, Mutex, mpsc};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use prost::Message as _;
 use proto::proto::ProtoMessage;
-use raft::{Channel, Node, Storage, InitialConfig, ValidNodeId};
+use raft::{Channel, InitialConfig, Node, Storage, ValidNodeId};
 
 /// Events emitted by the driver for tracking and visualization.
 #[derive(Debug, Clone)]
@@ -43,7 +42,7 @@ pub fn write_framed_message<W: Write>(writer: &mut W, msg: &ProtoMessage) -> std
     let len = msg.encoded_len();
     let len_u32 = len as u32;
     writer.write_all(&len_u32.to_be_bytes())?;
-    
+
     let mut buf = Vec::with_capacity(len);
     msg.encode(&mut buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -56,7 +55,7 @@ pub fn write_framed_message<W: Write>(writer: &mut W, msg: &ProtoMessage) -> std
 /// Dispatches outgoing messages directly to the registered active connections.
 #[derive(Clone)]
 pub struct DriverChannel {
-    active_connections: Arc<Mutex<HashMap<u64, TcpStream>>>,
+    active_connections: Arc<Mutex<Vec<Option<TcpStream>>>>,
     event_tx: Option<mpsc::Sender<DriverEvent>>,
 }
 
@@ -67,10 +66,14 @@ impl Channel for DriverChannel {
         }
         let to = msg.to;
         let mut active = self.active_connections.lock().unwrap();
-        if let Some(stream) = active.get_mut(&to) {
+        let to_idx = to as usize;
+        if to_idx >= active.len() {
+            active.resize_with(to_idx + 1, || None);
+        }
+        if let Some(stream) = active[to_idx].as_mut() {
             if let Err(e) = write_framed_message(stream, &msg) {
                 tracing::error!("Failed to send message to peer {}: {}", to, e);
-                active.remove(&to);
+                active[to_idx] = None;
             }
         } else {
             tracing::warn!("No active connection to peer {}", to);
@@ -80,19 +83,21 @@ impl Channel for DriverChannel {
     fn broadcast(&mut self, msg: ProtoMessage) {
         let mut active = self.active_connections.lock().unwrap();
         let mut failed_peers = Vec::new();
-        for (&peer_id, stream) in active.iter_mut() {
-            let mut msg_copy = msg.clone();
-            msg_copy.to = peer_id;
-            if let Some(ref tx) = self.event_tx {
-                let _ = tx.send(DriverEvent::MessageSent(msg_copy.clone()));
-            }
-            if let Err(e) = write_framed_message(stream, &msg_copy) {
-                tracing::error!("Failed to broadcast message to peer {}: {}", peer_id, e);
-                failed_peers.push(peer_id);
+        for (peer_id, slot) in active.iter_mut().enumerate() {
+            if let Some(stream) = slot.as_mut() {
+                let mut msg_copy = msg.clone();
+                msg_copy.to = peer_id as u64;
+                if let Some(ref tx) = self.event_tx {
+                    let _ = tx.send(DriverEvent::MessageSent(msg_copy.clone()));
+                }
+                if let Err(e) = write_framed_message(stream, &msg_copy) {
+                    tracing::error!("Failed to broadcast message to peer {}: {}", peer_id, e);
+                    failed_peers.push(peer_id);
+                }
             }
         }
         for peer_id in failed_peers {
-            active.remove(&peer_id);
+            active[peer_id] = None;
         }
     }
 }
@@ -116,22 +121,22 @@ impl<Store: Storage> RaftDriver<Store> {
     /// Automatically begins listening on `listen_addr` and connecting to all specified `peers`.
     pub fn new(
         id: u64,
-        peers: HashMap<u64, String>, // peer_id -> IP:port address
+        peers: Vec<Option<String>>, // peer_id -> IP:port address
         listen_addr: &str,
         storage: Store,
         config: InitialConfig,
         event_tx: Option<mpsc::Sender<DriverEvent>>,
     ) -> std::io::Result<Self> {
-        let active_connections = Arc::new(Mutex::new(HashMap::new()));
+        let active_connections = Arc::new(Mutex::new(Vec::new()));
         let (sender, receiver) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let tick_interval_ms = Arc::new(AtomicU64::new(10)); // Default to 10ms
-        
+
         // Bind the TCP listener for incoming connections from peer nodes.
         let listener = TcpListener::bind(listen_addr)?;
         let local_addr = listener.local_addr()?;
-        
+
         // Spawn listener thread for incoming connections
         let sender_clone = sender.clone();
         let shutdown_clone = Arc::clone(&shutdown);
@@ -139,12 +144,15 @@ impl<Store: Storage> RaftDriver<Store> {
         let event_tx_clone = event_tx.clone();
         let listener_thread = std::thread::spawn(move || {
             listener.set_nonblocking(true).unwrap_or(());
-            
+
             while !shutdown_clone.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         if let Err(e) = stream.set_nodelay(true) {
-                            tracing::error!("Failed to set TCP nodelay on incoming connection: {}", e);
+                            tracing::error!(
+                                "Failed to set TCP nodelay on incoming connection: {}",
+                                e
+                            );
                         }
                         let mut read_stream = match stream.try_clone() {
                             Ok(s) => s,
@@ -158,8 +166,10 @@ impl<Store: Storage> RaftDriver<Store> {
                         let p = Arc::clone(&paused_clone);
                         let etx = event_tx_clone.clone();
                         std::thread::spawn(move || {
-                            read_stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap_or(());
-                            
+                            read_stream
+                                .set_read_timeout(Some(Duration::from_millis(100)))
+                                .unwrap_or(());
+
                             while !sh.load(Ordering::Relaxed) {
                                 match read_framed_message(&mut read_stream) {
                                     Ok(msg) => {
@@ -168,17 +178,24 @@ impl<Store: Storage> RaftDriver<Store> {
                                             continue;
                                         }
                                         if let Some(ref tx) = etx {
-                                            let _ = tx.send(DriverEvent::MessageReceived(msg.clone()));
+                                            let _ =
+                                                tx.send(DriverEvent::MessageReceived(msg.clone()));
                                         }
                                         if let Err(_) = s.send(msg) {
                                             break; // Receiver disconnected
                                         }
                                     }
-                                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                                    Err(ref e)
+                                        if e.kind() == std::io::ErrorKind::WouldBlock
+                                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                                    {
                                         continue;
                                     }
                                     Err(e) => {
-                                        tracing::debug!("Incoming stream disconnected or read failed: {}", e);
+                                        tracing::debug!(
+                                            "Incoming stream disconnected or read failed: {}",
+                                            e
+                                        );
                                         break;
                                     }
                                 }
@@ -195,98 +212,131 @@ impl<Store: Storage> RaftDriver<Store> {
                 }
             }
         });
-        
+
         // Spawn individual outgoing connection manager threads for each peer
         let mut peer_threads = Vec::new();
-        for (peer_id, peer_addr) in peers {
-            let active_connections_clone = Arc::clone(&active_connections);
-            let s = sender.clone();
-            let sh = Arc::clone(&shutdown);
-            let p = Arc::clone(&paused);
-            let etx = event_tx.clone();
-            let handle = std::thread::spawn(move || {
-                while !sh.load(Ordering::Relaxed) {
-                    tracing::debug!("Attempting to connect to peer {} at {}", peer_id, peer_addr);
-                    match TcpStream::connect(&peer_addr) {
-                        Ok(stream) => {
-                            if let Err(e) = stream.set_nodelay(true) {
-                                tracing::error!("Failed to set TCP nodelay on outgoing connection to {}: {}", peer_id, e);
-                            }
-                            let write_stream = match stream.try_clone() {
-                                Ok(ws) => ws,
-                                Err(e) => {
-                                    tracing::error!("Failed to clone outgoing stream for {}: {}", peer_id, e);
-                                    std::thread::sleep(Duration::from_millis(500));
-                                    continue;
+        for (peer_id, peer_addr_opt) in peers.iter().enumerate() {
+            if let Some(peer_addr) = peer_addr_opt {
+                let peer_id = peer_id as u64;
+                let peer_addr = peer_addr.clone();
+                let active_connections_clone = Arc::clone(&active_connections);
+                let s = sender.clone();
+                let sh = Arc::clone(&shutdown);
+                let p = Arc::clone(&paused);
+                let etx = event_tx.clone();
+                let handle = std::thread::spawn(move || {
+                    while !sh.load(Ordering::Relaxed) {
+                        tracing::debug!("Attempting to connect to peer {} at {}", peer_id, peer_addr);
+                        match TcpStream::connect(&peer_addr) {
+                            Ok(stream) => {
+                                if let Err(e) = stream.set_nodelay(true) {
+                                    tracing::error!(
+                                        "Failed to set TCP nodelay on outgoing connection to {}: {}",
+                                        peer_id,
+                                        e
+                                    );
                                 }
-                            };
-                            
-                            // Register the connection
-                            {
-                                let mut active = active_connections_clone.lock().unwrap();
-                                active.insert(peer_id, write_stream);
-                            }
-                            
-                            let mut read_stream = stream;
-                            read_stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap_or(());
-                            
-                            while !sh.load(Ordering::Relaxed) {
-                                match read_framed_message(&mut read_stream) {
-                                    Ok(msg) => {
-                                        // Ignore messages if paused
-                                        if p.load(Ordering::Relaxed) {
-                                            continue;
-                                        }
-                                        if let Some(ref tx) = etx {
-                                            let _ = tx.send(DriverEvent::MessageReceived(msg.clone()));
-                                        }
-                                        if let Err(_) = s.send(msg) {
-                                            break; // Receiver disconnected
-                                        }
-                                    }
-                                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                                let write_stream = match stream.try_clone() {
+                                    Ok(ws) => ws,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to clone outgoing stream for {}: {}",
+                                            peer_id,
+                                            e
+                                        );
+                                        std::thread::sleep(Duration::from_millis(500));
                                         continue;
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("Outgoing connection to peer {} read failed: {}", peer_id, e);
-                                        break;
+                                };
+
+                                // Register the connection
+                                {
+                                    let mut active = active_connections_clone.lock().unwrap();
+                                    let peer_idx = peer_id as usize;
+                                    if peer_idx >= active.len() {
+                                        active.resize_with(peer_idx + 1, || None);
+                                    }
+                                    active[peer_idx] = Some(write_stream);
+                                }
+
+                                let mut read_stream = stream;
+                                read_stream
+                                    .set_read_timeout(Some(Duration::from_millis(100)))
+                                    .unwrap_or(());
+
+                                while !sh.load(Ordering::Relaxed) {
+                                    match read_framed_message(&mut read_stream) {
+                                        Ok(msg) => {
+                                            // Ignore messages if paused
+                                            if p.load(Ordering::Relaxed) {
+                                                continue;
+                                            }
+                                            if let Some(ref tx) = etx {
+                                                let _ =
+                                                    tx.send(DriverEvent::MessageReceived(msg.clone()));
+                                            }
+                                            if let Err(_) = s.send(msg) {
+                                                break; // Receiver disconnected
+                                            }
+                                        }
+                                        Err(ref e)
+                                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                                        {
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Outgoing connection to peer {} read failed: {}",
+                                                peer_id,
+                                                e
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Deregister connection upon disconnection
+                                {
+                                    let mut active = active_connections_clone.lock().unwrap();
+                                    let peer_idx = peer_id as usize;
+                                    if peer_idx < active.len() {
+                                        active[peer_idx] = None;
                                     }
                                 }
                             }
-                            
-                            // Deregister connection upon disconnection
-                            {
-                                let mut active = active_connections_clone.lock().unwrap();
-                                active.remove(&peer_id);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!("Failed to connect to peer {}: {}. Retrying...", peer_id, e);
-                            // Wait and check shutdown flag periodically to allow fast shutdown
-                            for _ in 0..10 {
-                                if sh.load(Ordering::Relaxed) {
-                                    break;
+                            Err(e) => {
+                                tracing::debug!(
+                                    "Failed to connect to peer {}: {}. Retrying...",
+                                    peer_id,
+                                    e
+                                );
+                                // Wait and check shutdown flag periodically to allow fast shutdown
+                                for _ in 0..10 {
+                                    if sh.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(50));
                                 }
-                                std::thread::sleep(Duration::from_millis(50));
                             }
                         }
                     }
-                }
-            });
-            peer_threads.push(handle);
+                });
+                peer_threads.push(handle);
+            }
         }
-        
+
         let valid_id = ValidNodeId(std::num::NonZeroU64::new(id).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "Node ID must be non-zero")
         })?);
-        
+
         let channel = DriverChannel {
             active_connections: Arc::clone(&active_connections),
             event_tx: event_tx.clone(),
         };
-        
+
         let node = Node::new(valid_id, storage, channel, config);
-        
+
         Ok(Self {
             node,
             receiver,
@@ -299,17 +349,17 @@ impl<Store: Storage> RaftDriver<Store> {
             event_tx,
         })
     }
-    
+
     /// Returns the local address the driver is bound and listening on.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
-    
+
     /// Signals the driver and all background connection threads to shut down.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
     }
-    
+
     fn get_state_event(&self) -> DriverEvent {
         DriverEvent::StateChanged {
             id: u64::from(self.node.id),
@@ -323,7 +373,7 @@ impl<Store: Storage> RaftDriver<Store> {
             },
         }
     }
-    
+
     /// Starts the main event loop.
     /// Blocks the current thread, ticking the state machine every `tick_interval_ms`
     /// and immediately passing any received network messages to `node.step()`.
@@ -331,7 +381,7 @@ impl<Store: Storage> RaftDriver<Store> {
         let mut last_tick_ms = self.tick_interval_ms.load(Ordering::Relaxed);
         let mut tick_interval = Duration::from_millis(last_tick_ms);
         let mut next_tick = Instant::now() + tick_interval;
-        
+
         let mut last_term = self.node.term;
         let mut last_role = match &self.node.role {
             raft::Role::Follower(_) => 0,
@@ -370,13 +420,13 @@ impl<Store: Storage> RaftDriver<Store> {
             } else {
                 Duration::from_millis(0)
             };
-            
+
             match self.receiver.recv_timeout(timeout) {
                 Ok(msg) => {
                     if let Err(e) = self.node.step(proto::proto::Message::from(msg)) {
                         tracing::error!("Error stepping message in raft node: {}", e);
                     }
-                    
+
                     // Process any other messages currently in the channel immediately
                     while let Ok(msg) = self.receiver.try_recv() {
                         if let Err(e) = self.node.step(proto::proto::Message::from(msg)) {
@@ -392,7 +442,7 @@ impl<Store: Storage> RaftDriver<Store> {
                     break;
                 }
             }
-            
+
             let now = Instant::now();
             if now >= next_tick {
                 self.node.tick();
@@ -410,23 +460,23 @@ impl<Store: Storage> RaftDriver<Store> {
             };
             let current_voted_for = u64::from(self.node.voted_for);
             let current_leader_id = u64::from(self.node.leader_id);
-            
-            if self.node.term != last_term 
-                || current_role != last_role 
-                || current_voted_for != last_voted_for 
-                || current_leader_id != last_leader_id 
+
+            if self.node.term != last_term
+                || current_role != last_role
+                || current_voted_for != last_voted_for
+                || current_leader_id != last_leader_id
             {
                 last_term = self.node.term;
                 last_role = current_role;
                 last_voted_for = current_voted_for;
                 last_leader_id = current_leader_id;
-                
+
                 if let Some(ref tx) = self.event_tx {
                     let _ = tx.send(self.get_state_event());
                 }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -434,11 +484,11 @@ impl<Store: Storage> RaftDriver<Store> {
 impl<Store: Storage> Drop for RaftDriver<Store> {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        
+
         if let Some(h) = self.listener_thread.take() {
             let _ = h.join();
         }
-        
+
         let mut threads = std::mem::take(&mut self.peer_threads);
         for h in threads.drain(..) {
             let _ = h.join();
@@ -502,8 +552,8 @@ mod tests {
         };
 
         let storage = TestStorage { last_index: 0 };
-        let peers = HashMap::new();
-        
+        let peers = Vec::new();
+
         let driver = RaftDriver::new(1, peers, "127.0.0.1:0", storage, config, None).unwrap();
         let _addr = driver.local_addr();
 
