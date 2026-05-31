@@ -159,5 +159,6 @@ fn leader_not_elected_with_one_vote() {
         candidate.tick();
     }
 
+    // After election passes with only one vote, candidate should start new election
     assert_eq!(last_term + 1, candidate.term);
 }
