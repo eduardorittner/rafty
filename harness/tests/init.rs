@@ -1,11 +1,11 @@
-use harness::utils::basic_cluster;
+use harness::Cluster;
 use raft::{FollowerState, INVALID_ID, Role};
 
 #[test]
 fn initial_node_state() {
-    let nodes = basic_cluster();
+    let cluster = Cluster::new();
 
-    for node in nodes {
+    for node in &cluster.nodes {
         // According to the original paper, nodes should start:
         // 1. as followers
         assert_eq!(
