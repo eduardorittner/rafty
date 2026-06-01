@@ -1,0 +1,3 @@
+- Subir `Message Trace Log` pra junto to `Cluster Tuning`, `Cluster Ndoes` fica em baixo
+- Diminuir bordas do pentagrama
+- Adicionar aba de dados, poder selecionar entre dados, estado do cluster
