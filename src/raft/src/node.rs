@@ -338,26 +338,32 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         } else {
             match self.voted_for.0 {
                 Some(vote) => vote.into(),
-                None => req.from,
+                None => {
+                    self.voted_for = req.from.into();
+                    req.from
+                }
             }
         };
 
-        self.send_vote_response(vote, req.from, req.candidate_term);
+        self.send_vote_response(vote, req.from);
     }
 
     fn step_vote_response(&mut self, req: RequestVoteResponse) {
-        if req.term != self.term {
-            info!(
-                "Node {} received stale VoteResponse: current term {}, response term {}",
-                self.id, self.term, req.term
-            );
-            return;
-        }
         match &mut self.role {
             Role::Follower(_) | Role::Leader(_) => {
                 error!("Received vote response when not a candidate")
             }
             Role::Candidate(state) => {
+                if req.term > self.term {
+                    info!(
+                        "[{}], Candidate received a response with higher term than itself, becoming follower",
+                        self.id
+                    );
+                    self.term = req.term;
+                    self.role = self.role.to_owned().become_follower();
+                    return;
+                }
+
                 let vote = if req.voted_for == self.id.into() {
                     Vote::For
                 } else {
@@ -414,13 +420,13 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         );
     }
 
-    fn send_vote_response(&mut self, vote_for: u64, to: u64, term: u64) {
+    fn send_vote_response(&mut self, vote_for: u64, to: u64) {
         self.channel.send(
             Message::RequestVoteResponse(RequestVoteResponse {
                 to,
                 from: self.id.into(),
                 voted_for: vote_for,
-                term,
+                term: self.term,
             })
             .into(),
         );
