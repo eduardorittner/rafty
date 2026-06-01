@@ -285,10 +285,15 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             Role::Follower(state) => {
                 if self.term > req.term {
                     error!(
-                        "[{}] at term {} received heartbeat with term {}",
+                        "[{}] at term {} received invalid heartbeat with term {}",
                         self.id, self.term, req.term
                     );
+                    self.send_heartbeat_response_to(req.from);
                 } else {
+                    if req.term > self.term {
+                        self.term = req.term;
+                        self.voted_for = INVALID_ID;
+                    }
                     state.ticks_since_last_msg = 0;
 
                     let from = req.from.into();
@@ -305,10 +310,13 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             Role::Candidate(_) => {
                 if self.term > req.term {
                     error!(
-                        "[{}] at term {} received heartbeat with term {}",
+                        "[{}] at term {} received invalid heartbeat with term {}",
                         self.id, self.term, req.term
                     );
+                    self.send_heartbeat_response_to(req.from);
                 } else {
+                    self.term = req.term;
+                    self.voted_for = INVALID_ID;
                     self.role = self.role.to_owned().become_follower();
                     self.leader_id = req.from.into();
                     info!(
@@ -319,7 +327,11 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                 }
             }
             Role::Leader(_) => {
-                if self.term < req.term {
+                if self.term > req.term {
+                    self.send_heartbeat_response_to(req.from);
+                } else if self.term < req.term {
+                    self.term = req.term;
+                    self.voted_for = INVALID_ID;
                     self.role = self.role.to_owned().become_follower();
                     self.leader_id = req.from.into();
                     info!(
@@ -333,6 +345,15 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     }
 
     fn step_vote_request(&mut self, req: RequestVote) {
+        if req.candidate_term > self.term {
+            self.term = req.candidate_term;
+            self.voted_for = INVALID_ID;
+            self.leader_id = INVALID_ID;
+            if !matches!(self.role, Role::Follower(_)) {
+                self.role = self.role.to_owned().become_follower();
+            }
+        }
+
         let vote = if req.candidate_term < self.term {
             INVALID_ID.into()
         } else {
@@ -351,7 +372,15 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     fn step_vote_response(&mut self, req: RequestVoteResponse) {
         match &mut self.role {
             Role::Follower(_) | Role::Leader(_) => {
-                error!("Received vote response when not a candidate")
+                if req.term > self.term {
+                    self.term = req.term;
+                    self.voted_for = INVALID_ID;
+                    if !matches!(self.role, Role::Follower(_)) {
+                        self.role = self.role.to_owned().become_follower();
+                    }
+                } else {
+                    error!("Received vote response when not a candidate")
+                }
             }
             Role::Candidate(state) => {
                 if req.term > self.term {
@@ -360,6 +389,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                         self.id
                     );
                     self.term = req.term;
+                    self.voted_for = INVALID_ID;
                     self.role = self.role.to_owned().become_follower();
                     return;
                 }
@@ -407,9 +437,13 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     }
 
     fn send_heartbeat_response(&mut self) {
+        self.send_heartbeat_response_to(self.leader_id.into());
+    }
+
+    fn send_heartbeat_response_to(&mut self, to: u64) {
         self.channel.send(
             Message::Heartbeat(Heartbeat {
-                to: self.leader_id.into(),
+                to,
                 from: self.id.into(),
                 term: self.term,
                 commit: self.storage.committed,
