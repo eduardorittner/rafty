@@ -477,7 +477,10 @@
             }
         }
 
+        let lastSliderInteraction = 0;
+
         async function changeTickRate(val) {
+            lastSliderInteraction = Date.now();
             document.getElementById('tick-rate-val').textContent = val;
             try {
                 await fetch(`/api/cluster/tick_rate?value=${val}`, { method: 'POST' });
@@ -558,7 +561,7 @@
                 // Update dynamic tick rate UI if user is not currently interacting with the slider
                 const slider = document.getElementById('tick-rate-slider');
                 const valLabel = document.getElementById('tick-rate-val');
-                if (document.activeElement !== slider) {
+                if (Date.now() - lastSliderInteraction > 1000 && document.activeElement !== slider) {
                     slider.value = data.tick_rate_ms;
                     valLabel.textContent = data.tick_rate_ms;
                 }

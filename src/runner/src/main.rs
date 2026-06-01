@@ -1,6 +1,5 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use proto::proto::Entry;
@@ -109,20 +108,34 @@ const INDEX_HTML: &[u8] = include_bytes!("index.html");
 
 /// Unified struct holding control handles and signals for a Raft driver node.
 struct NodeControl {
-    paused: Arc<AtomicBool>,
-    shutdown: Arc<AtomicBool>,
+    control_tx: mpsc::Sender<driver::ConfigChange>,
     join_handle: Option<std::thread::JoinHandle<()>>,
-    tick_rate: Arc<AtomicU64>,
+}
+
+/// Response sent by the actor when a node is toggled or restarted.
+#[derive(Debug, Clone, serde::Serialize)]
+struct NodeActionResponse {
+    success: bool,
+    action: String,
+    paused: bool,
+}
+
+enum VisualizerMessage {
+    DriverEvent(driver::DriverEvent),
+    GetState(mpsc::Sender<String>),
+    RestartCluster(mpsc::Sender<()>),
+    SetTickRate(u64, mpsc::Sender<bool>),
+    ToggleOrRestartNode(u64, mpsc::Sender<Result<NodeActionResponse, ()>>),
 }
 
 /// Helper function to reconstruct a panicked/crashed driver thread.
-fn restart_node(
+fn actor_restart_node(
     id: u64,
     storages: &[Option<Arc<Mutex<MemStorage>>>],
-    node_controls: &Arc<Mutex<Vec<Option<NodeControl>>>>,
+    node_controls: &mut [Option<NodeControl>],
     peer_addresses: &[Option<String>],
     event_tx: &mpsc::Sender<driver::DriverEvent>,
-    cluster_state: &Arc<Mutex<ClusterState>>,
+    cluster_state: &mut ClusterState,
 ) {
     println!("Restarting crashed Node {}...", id);
 
@@ -166,33 +179,15 @@ fn restart_node(
     .expect("Failed to recreate driver");
 
     // Copy the current adjusted tick interval to the new driver instance
-    let old_tick_ms = {
-        let controls = lock_mutex(node_controls);
-        if let Some(ctrl) = controls.get(id as usize).and_then(|c| c.as_ref()) {
-            ctrl.tick_rate.load(Ordering::Relaxed)
-        } else {
-            100
-        }
-    };
-    driver
-        .tick_interval_ms
-        .store(old_tick_ms, Ordering::Relaxed);
-
-    // Make sure it starts unpaused
-    driver.paused.store(false, Ordering::Relaxed);
+    let old_tick_ms = cluster_state.tick_rate_ms;
+    let control_tx = driver.control_tx.clone();
+    let _ = control_tx.send(driver::ConfigChange::TickInterval(old_tick_ms));
 
     // Reset visual state
-    {
-        let mut s = lock_mutex(cluster_state);
-        if let Some(ref mut node_state) = s.nodes[id as usize] {
-            node_state.paused = false;
-            node_state.role = "Follower".to_string(); // Starts back as Follower
-        }
+    if let Some(ref mut node_state) = cluster_state.nodes[id as usize] {
+        node_state.paused = false;
+        node_state.role = "Follower".to_string(); // Starts back as Follower
     }
-
-    let paused = Arc::clone(&driver.paused);
-    let shutdown = Arc::clone(&driver.shutdown);
-    let tick_rate = Arc::clone(&driver.tick_interval_ms);
 
     // Spawn running thread
     let node_id = id;
@@ -208,55 +203,41 @@ fn restart_node(
     });
 
     // Update the control registry
-    {
-        let mut controls = lock_mutex(node_controls);
-        controls[id as usize] = Some(NodeControl {
-            paused,
-            shutdown,
-            join_handle: Some(handle),
-            tick_rate,
-        });
-    }
+    node_controls[id as usize] = Some(NodeControl {
+        control_tx,
+        join_handle: Some(handle),
+    });
 }
 
 /// Dynamic reset function to wipe all cluster nodes and restart from term 0
-fn restart_cluster(
+fn actor_restart_cluster(
     storages: &[Option<Arc<Mutex<MemStorage>>>],
-    node_controls: &Arc<Mutex<Vec<Option<NodeControl>>>>,
+    node_controls: &mut [Option<NodeControl>],
     peer_addresses: &[Option<String>],
     event_tx: &mpsc::Sender<driver::DriverEvent>,
-    cluster_state: &Arc<Mutex<ClusterState>>,
+    cluster_state: &mut ClusterState,
 ) {
     println!("Restarting cluster from scratch...");
 
     // 1. Send shutdown signal to all drivers
-    {
-        let controls = lock_mutex(node_controls);
-        for ctrl_opt in controls.iter() {
-            if let Some(ctrl) = ctrl_opt {
-                ctrl.shutdown.store(true, Ordering::Relaxed);
-            }
+    for ctrl_opt in node_controls.iter() {
+        if let Some(ctrl) = ctrl_opt {
+            let _ = ctrl.control_tx.send(driver::ConfigChange::Shutdown(true));
         }
     }
 
     // 2. Wait/join for all thread loops to exit cleanly (freeing ports)
-    {
-        let mut controls = lock_mutex(node_controls);
-        for ctrl_opt in controls.iter_mut() {
-            if let Some(mut ctrl) = ctrl_opt.take() {
-                if let Some(handle) = ctrl.join_handle.take() {
-                    let _ = handle.join();
-                }
+    for ctrl_opt in node_controls.iter_mut() {
+        if let Some(mut ctrl) = ctrl_opt.take() {
+            if let Some(handle) = ctrl.join_handle.take() {
+                let _ = handle.join();
             }
         }
     }
 
     // 3. Clear message logs and retrieve previous tick rate
-    let current_tick_rate = {
-        let mut s = lock_mutex(cluster_state);
-        s.messages.clear();
-        s.tick_rate_ms
-    };
+    cluster_state.messages.clear();
+    let current_tick_rate = cluster_state.tick_rate_ms;
 
     // 4. Wipe log storages back to empty (term 0)
     for storage_opt in storages.iter() {
@@ -299,26 +280,18 @@ fn restart_cluster(
         .expect("Failed to start driver");
 
         // Preserve previous tick rate
-        driver
-            .tick_interval_ms
-            .store(current_tick_rate, Ordering::Relaxed);
-
-        let paused = Arc::clone(&driver.paused);
-        let shutdown = Arc::clone(&driver.shutdown);
-        let tick_rate = Arc::clone(&driver.tick_interval_ms);
+        let control_tx = driver.control_tx.clone();
+        let _ = control_tx.send(driver::ConfigChange::TickInterval(current_tick_rate));
 
         // Reset visual state
-        {
-            let mut s = lock_mutex(cluster_state);
-            s.nodes[id as usize] = Some(NodeVisualState {
-                id,
-                term: 0,
-                voted_for: 0,
-                leader_id: 0,
-                role: "Follower".to_string(),
-                paused: false,
-            });
-        }
+        cluster_state.nodes[id as usize] = Some(NodeVisualState {
+            id,
+            term: 0,
+            voted_for: 0,
+            leader_id: 0,
+            role: "Follower".to_string(),
+            paused: false,
+        });
 
         // Spawn running thread
         let node_id = id;
@@ -336,24 +309,195 @@ fn restart_cluster(
             }
         });
 
-        let mut controls = lock_mutex(node_controls);
-        controls[id as usize] = Some(NodeControl {
-            paused,
-            shutdown,
+        node_controls[id as usize] = Some(NodeControl {
+            control_tx,
             join_handle: Some(handle),
-            tick_rate,
         });
     }
 }
 
-fn handle_http_connection(
-    mut stream: TcpStream,
-    state: Arc<Mutex<ClusterState>>,
-    node_controls: Arc<Mutex<Vec<Option<NodeControl>>>>,
+struct VisualizerActor {
+    state: ClusterState,
+    node_controls: Vec<Option<NodeControl>>,
     storages: Arc<Vec<Option<Arc<Mutex<MemStorage>>>>>,
     peer_addresses: Arc<Vec<Option<String>>>,
     event_tx: mpsc::Sender<driver::DriverEvent>,
-) {
+    actor_rx: mpsc::Receiver<VisualizerMessage>,
+}
+
+impl VisualizerActor {
+    fn run(mut self) {
+        while let Ok(msg) = self.actor_rx.recv() {
+            match msg {
+                VisualizerMessage::DriverEvent(event) => {
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis();
+
+                    match event {
+                        driver::DriverEvent::MessageSent(msg) => {
+                            let msg_type = match msg.msg_type() {
+                                proto::proto::ProtoMessageType::Heartbeat => {
+                                    "Heartbeat".to_string()
+                                }
+                                proto::proto::ProtoMessageType::AppendEntries => {
+                                    "AppendEntries".to_string()
+                                }
+                                proto::proto::ProtoMessageType::AppendEntriesResponse => {
+                                    "AppendEntriesResponse".to_string()
+                                }
+                                proto::proto::ProtoMessageType::RequestVote => {
+                                    "RequestVote".to_string()
+                                }
+                                proto::proto::ProtoMessageType::RequestVoteResponse => {
+                                    "RequestVoteResponse".to_string()
+                                }
+                            };
+                            self.state.messages.push(MessageVisualEvent {
+                                from: msg.from,
+                                to: msg.to,
+                                msg_type,
+                                term: msg.term,
+                                timestamp,
+                            });
+
+                            // Keep message logs bounded in state
+                            if self.state.messages.len() > 300 {
+                                self.state.messages.remove(0);
+                            }
+                        }
+                        driver::DriverEvent::MessageReceived(_) => {}
+                        driver::DriverEvent::StateChanged {
+                            id,
+                            term,
+                            voted_for,
+                            leader_id,
+                            role,
+                        } => {
+                            let idx = id as usize;
+                            if idx < self.state.nodes.len() {
+                                if let Some(ref mut node_state) = self.state.nodes[idx] {
+                                    node_state.term = term;
+                                    node_state.voted_for = voted_for;
+                                    node_state.leader_id = leader_id;
+                                    node_state.role = role;
+                                }
+                            }
+                        }
+                        driver::DriverEvent::Shutdown { .. } => {}
+                        driver::DriverEvent::Paused { id, paused } => {
+                            let idx = id as usize;
+                            if idx < self.state.nodes.len() {
+                                if let Some(ref mut node_state) = self.state.nodes[idx] {
+                                    node_state.paused = paused;
+                                }
+                            }
+                        }
+                        driver::DriverEvent::TickInterval { interval_ms, .. } => {
+                            self.state.tick_rate_ms = interval_ms;
+                        }
+                    }
+                }
+                VisualizerMessage::GetState(resp_tx) => {
+                    // Check liveness of join handles and mark exited threads as Crashed
+                    for (id, control_opt) in self.node_controls.iter().enumerate() {
+                        if let Some(control) = control_opt {
+                            if let Some(ref handle) = control.join_handle {
+                                if handle.is_finished() {
+                                    if id < self.state.nodes.len() {
+                                        if let Some(ref mut node_state) = self.state.nodes[id] {
+                                            if node_state.role != "Crashed" {
+                                                node_state.role = "Crashed".to_string();
+                                                node_state.paused = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let json_data = serde_json::to_string(&self.state).unwrap();
+                    let _ = resp_tx.send(json_data);
+                }
+                VisualizerMessage::RestartCluster(resp_tx) => {
+                    actor_restart_cluster(
+                        &self.storages,
+                        &mut self.node_controls,
+                        &self.peer_addresses,
+                        &self.event_tx,
+                        &mut self.state,
+                    );
+                    let _ = resp_tx.send(());
+                }
+                VisualizerMessage::SetTickRate(ms, resp_tx) => {
+                    for ctrl_opt in self.node_controls.iter_mut() {
+                        if let Some(ctrl) = ctrl_opt {
+                            let _ = ctrl.control_tx.send(driver::ConfigChange::TickInterval(ms));
+                        }
+                    }
+                    self.state.tick_rate_ms = ms;
+                    let _ = resp_tx.send(true);
+                }
+                VisualizerMessage::ToggleOrRestartNode(node_id, resp_tx) => {
+                    let is_crashed = if let Some(ctrl) = self
+                        .node_controls
+                        .get(node_id as usize)
+                        .and_then(|c| c.as_ref())
+                    {
+                        ctrl.join_handle
+                            .as_ref()
+                            .map(|h| h.is_finished())
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if is_crashed {
+                        actor_restart_node(
+                            node_id,
+                            &self.storages,
+                            &mut self.node_controls,
+                            &self.peer_addresses,
+                            &self.event_tx,
+                            &mut self.state,
+                        );
+                        let _ = resp_tx.send(Ok(NodeActionResponse {
+                            success: true,
+                            action: "restarted".to_string(),
+                            paused: false,
+                        }));
+                    } else if let Some(ctrl) = self
+                        .node_controls
+                        .get(node_id as usize)
+                        .and_then(|c| c.as_ref())
+                    {
+                        let prev = self.state.nodes[node_id as usize]
+                            .as_ref()
+                            .map(|n| n.paused)
+                            .unwrap_or(false);
+                        let _ = ctrl.control_tx.send(driver::ConfigChange::Pause(!prev));
+
+                        if let Some(ref mut node_state) = self.state.nodes[node_id as usize] {
+                            node_state.paused = !prev;
+                        }
+
+                        let _ = resp_tx.send(Ok(NodeActionResponse {
+                            success: true,
+                            action: "toggle".to_string(),
+                            paused: !prev,
+                        }));
+                    } else {
+                        let _ = resp_tx.send(Err(()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_http_connection(mut stream: TcpStream, actor_tx: mpsc::Sender<VisualizerMessage>) {
     let mut buffer = [0; 4096];
     let n = match stream.read(&mut buffer) {
         Ok(n) => n,
@@ -362,81 +506,52 @@ fn handle_http_connection(
     let request = String::from_utf8_lossy(&buffer[..n]);
 
     if request.starts_with("GET /api/state") {
-        // Check liveness of join handles and mark exited threads as Crashed
-        {
-            let mut s = lock_mutex(&state);
-            let controls = lock_mutex(&node_controls);
-            for (id, control_opt) in controls.iter().enumerate() {
-                if let Some(control) = control_opt {
-                    if let Some(ref handle) = control.join_handle {
-                        if handle.is_finished() {
-                            if id < s.nodes.len() {
-                                if let Some(ref mut node_state) = s.nodes[id] {
-                                    if node_state.role != "Crashed" {
-                                        node_state.role = "Crashed".to_string();
-                                        node_state.paused = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        let (tx, rx) = mpsc::channel();
+        if actor_tx.send(VisualizerMessage::GetState(tx)).is_ok() {
+            if let Ok(json_data) = rx.recv() {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+                    json_data.len(),
+                    json_data
+                );
+                let _ = stream.write_all(response.as_bytes());
             }
         }
-
-        let json_data = {
-            let s = lock_mutex(&state);
-            serde_json::to_string(&*s).unwrap()
-        };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-            json_data.len(),
-            json_data
-        );
-        let _ = stream.write_all(response.as_bytes());
     } else if request.starts_with("POST /api/cluster/restart") {
-        restart_cluster(
-            &storages,
-            &node_controls,
-            &peer_addresses,
-            &event_tx,
-            &state,
-        );
-        let response_body = "{\"success\":true}";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
-        let _ = stream.write_all(response.as_bytes());
-        return;
+        let (tx, rx) = mpsc::channel();
+        if actor_tx.send(VisualizerMessage::RestartCluster(tx)).is_ok() {
+            let _ = rx.recv();
+            let response_body = "{\"success\":true}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
     } else if request.starts_with("POST /api/cluster/tick_rate") {
         if let Some(pos) = request.find("value=") {
             let val_str = request[pos + 6..].split_whitespace().next().unwrap_or("");
             let val_clean: String = val_str.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(ms) = val_clean.parse::<u64>() {
                 if ms >= 5 && ms <= 5000 {
+                    let (tx, rx) = mpsc::channel();
+                    if actor_tx
+                        .send(VisualizerMessage::SetTickRate(ms, tx))
+                        .is_ok()
                     {
-                        let mut controls = lock_mutex(&node_controls);
-                        for ctrl_opt in controls.iter_mut() {
-                            if let Some(ctrl) = ctrl_opt {
-                                ctrl.tick_rate.store(ms, Ordering::Relaxed);
-                            }
+                        if let Ok(true) = rx.recv() {
+                            let response_body =
+                                format!("{{\"success\":true,\"tick_rate_ms\":{}}}", ms);
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+                                response_body.len(),
+                                response_body
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                            return;
                         }
                     }
-                    {
-                        let mut s = lock_mutex(&state);
-                        s.tick_rate_ms = ms;
-                    }
-
-                    let response_body = format!("{{\"success\":true,\"tick_rate_ms\":{}}}", ms);
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                        response_body.len(),
-                        response_body
-                    );
-                    let _ = stream.write_all(response.as_bytes());
-                    return;
                 }
             }
         }
@@ -449,59 +564,21 @@ fn handle_http_connection(
             let segments: Vec<&str> = path.split('/').collect();
             if segments.len() >= 4 && segments[2] == "node" {
                 if let Ok(node_id) = segments[3].parse::<u64>() {
-                    let is_crashed = {
-                        let controls = lock_mutex(&node_controls);
-                        if let Some(ctrl) = controls.get(node_id as usize).and_then(|c| c.as_ref()) {
-                            ctrl.join_handle.as_ref().map(|h| h.is_finished()).unwrap_or(false)
-                        } else {
-                            false
+                    let (tx, rx) = mpsc::channel();
+                    if actor_tx
+                        .send(VisualizerMessage::ToggleOrRestartNode(node_id, tx))
+                        .is_ok()
+                    {
+                        if let Ok(Ok(res)) = rx.recv() {
+                            let response_body = serde_json::to_string(&res).unwrap();
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+                                response_body.len(),
+                                response_body
+                            );
+                            let _ = stream.write_all(response.as_bytes());
+                            return;
                         }
-                    };
-
-                    if is_crashed {
-                        restart_node(
-                            node_id,
-                            &storages,
-                            &node_controls,
-                            &peer_addresses,
-                            &event_tx,
-                            &state,
-                        );
-
-                        let response_body =
-                            "{\"success\":true,\"action\":\"restarted\",\"paused\":false}";
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                            response_body.len(),
-                            response_body
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        return;
-                    }
-
-                    let controls = lock_mutex(&node_controls);
-                    if let Some(ctrl) = controls.get(node_id as usize).and_then(|c| c.as_ref()) {
-                        let prev = ctrl.paused.load(Ordering::Relaxed);
-                        ctrl.paused.store(!prev, Ordering::Relaxed);
-
-                        {
-                            let mut s = lock_mutex(&state);
-                            if let Some(ref mut node_state) = s.nodes[node_id as usize] {
-                                node_state.paused = !prev;
-                            }
-                        }
-
-                        let response_body = format!(
-                            "{{\"success\":true,\"action\":\"toggle\",\"paused\":{}}}",
-                            !prev
-                        );
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                            response_body.len(),
-                            response_body
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        return;
                     }
                 }
             }
@@ -551,77 +628,26 @@ fn main() {
             paused: false,
         });
     }
-    let cluster_state = Arc::new(Mutex::new(ClusterState {
+    let initial_state = ClusterState {
         nodes: initial_nodes,
         messages: Vec::new(),
         tick_rate_ms: 100,
-    }));
+    };
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (actor_tx, actor_rx) = std::sync::mpsc::channel::<VisualizerMessage>();
 
-    // Spawn event collector thread
-    let state_clone = Arc::clone(&cluster_state);
+    // Spawn event collector/forwarder thread to forward DriverEvents to the Actor channel
+    let event_tx_actor = actor_tx.clone();
     std::thread::spawn(move || {
         while let Ok(event) = event_rx.recv() {
-            let mut s = lock_mutex(&state_clone);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis();
-
-            match event {
-                driver::DriverEvent::MessageSent(msg) => {
-                    let msg_type = match msg.msg_type() {
-                        proto::proto::ProtoMessageType::Heartbeat => "Heartbeat".to_string(),
-                        proto::proto::ProtoMessageType::AppendEntries => {
-                            "AppendEntries".to_string()
-                        }
-                        proto::proto::ProtoMessageType::AppendEntriesResponse => {
-                            "AppendEntriesResponse".to_string()
-                        }
-                        proto::proto::ProtoMessageType::RequestVote => "RequestVote".to_string(),
-                        proto::proto::ProtoMessageType::RequestVoteResponse => {
-                            "RequestVoteResponse".to_string()
-                        }
-                    };
-                    s.messages.push(MessageVisualEvent {
-                        from: msg.from,
-                        to: msg.to,
-                        msg_type,
-                        term: msg.term,
-                        timestamp,
-                    });
-
-                    // Keep message logs bounded in state
-                    if s.messages.len() > 300 {
-                        s.messages.remove(0);
-                    }
-                }
-                driver::DriverEvent::MessageReceived(_) => {}
-                driver::DriverEvent::StateChanged {
-                    id,
-                    term,
-                    voted_for,
-                    leader_id,
-                    role,
-                } => {
-                    let idx = id as usize;
-                    if idx < s.nodes.len() {
-                        if let Some(ref mut node_state) = s.nodes[idx] {
-                            node_state.term = term;
-                            node_state.voted_for = voted_for;
-                            node_state.leader_id = leader_id;
-                            node_state.role = role;
-                        }
-                    }
-                }
-            }
+            let _ = event_tx_actor.send(VisualizerMessage::DriverEvent(event));
         }
     });
 
-    let node_controls = Arc::new(Mutex::new(
-        (0..=num_nodes).map(|_| None).collect::<Vec<Option<NodeControl>>>()
-    ));
+    let mut node_controls = (0..=num_nodes)
+        .map(|_| None)
+        .collect::<Vec<Option<NodeControl>>>();
     let peer_addresses_arc = Arc::new(peer_addresses.clone());
 
     // Initial spin up of the nodes
@@ -636,9 +662,9 @@ fn main() {
         let config = raft::InitialConfig {
             id: raft::ValidNodeId(std::num::NonZeroU64::new(id as u64).unwrap()),
             cluster_size: num_nodes as u64,
-            min_ticks_before_election: std::num::NonZeroU64::new(100).unwrap(),
-            max_ticks_before_election: std::num::NonZeroU64::new(200).unwrap(),
-            ticks_between_heartbeats: std::num::NonZeroU64::new(20).unwrap(),
+            min_ticks_before_election: std::num::NonZeroU64::new(10).unwrap(),
+            max_ticks_before_election: std::num::NonZeroU64::new(20).unwrap(),
+            ticks_between_heartbeats: std::num::NonZeroU64::new(2).unwrap(),
             last_applied_idx: None,
         };
 
@@ -658,9 +684,8 @@ fn main() {
             }
         };
 
-        let paused = Arc::clone(&driver.paused);
-        let shutdown = Arc::clone(&driver.shutdown);
-        let tick_rate = Arc::clone(&driver.tick_interval_ms);
+        let control_tx = driver.control_tx.clone();
+        let _ = control_tx.send(driver::ConfigChange::TickInterval(100));
 
         // Spawn driver running thread
         let node_id = id as u64;
@@ -678,14 +703,24 @@ fn main() {
             }
         });
 
-        let mut controls = lock_mutex(&node_controls);
-        controls[id] = Some(NodeControl {
-            paused,
-            shutdown,
+        node_controls[id] = Some(NodeControl {
+            control_tx,
             join_handle: Some(handle),
-            tick_rate,
         });
     }
+
+    // Spawn the VisualizerActor thread
+    let actor = VisualizerActor {
+        state: initial_state,
+        node_controls,
+        storages: Arc::clone(&storages),
+        peer_addresses: Arc::clone(&peer_addresses_arc),
+        event_tx: event_tx.clone(),
+        actor_rx,
+    };
+    std::thread::spawn(move || {
+        actor.run();
+    });
 
     // Start HTTP Server for the visualizer
     let http_addr = "127.0.0.1:8080";
@@ -697,21 +732,10 @@ fn main() {
 
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
-            let state_clone = Arc::clone(&cluster_state);
-            let controls_clone = Arc::clone(&node_controls);
-            let storages_clone = Arc::clone(&storages);
-            let peer_addresses_clone = Arc::clone(&peer_addresses_arc);
-            let event_tx_clone = event_tx.clone();
+            let actor_tx_clone = actor_tx.clone();
 
             std::thread::spawn(move || {
-                handle_http_connection(
-                    stream,
-                    state_clone,
-                    controls_clone,
-                    storages_clone,
-                    peer_addresses_clone,
-                    event_tx_clone,
-                );
+                handle_http_connection(stream, actor_tx_clone);
             });
         }
     }

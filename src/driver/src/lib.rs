@@ -8,6 +8,13 @@ use prost::Message as _;
 use proto::proto::ProtoMessage;
 use raft::{Channel, InitialConfig, Node, Storage, ValidNodeId};
 
+#[derive(Debug, Clone)]
+pub enum ConfigChange {
+    Shutdown(bool),
+    Pause(bool),
+    TickInterval(u64),
+}
+
 /// Events emitted by the driver for tracking and visualization.
 #[derive(Debug, Clone)]
 pub enum DriverEvent {
@@ -20,6 +27,9 @@ pub enum DriverEvent {
         leader_id: u64,
         role: String,
     },
+    Shutdown { id: u64, shutdown: bool },
+    Paused { id: u64, paused: bool },
+    TickInterval { id: u64, interval_ms: u64 },
 }
 
 /// Reads a length-prefixed `ProtoMessage` from a reader.
@@ -107,9 +117,11 @@ impl Channel for DriverChannel {
 pub struct RaftDriver<Store: Storage> {
     pub node: Node<Store, DriverChannel>,
     receiver: mpsc::Receiver<ProtoMessage>,
-    pub shutdown: Arc<AtomicBool>,
-    pub paused: Arc<AtomicBool>,
-    pub tick_interval_ms: Arc<AtomicU64>,
+    pub control_tx: mpsc::Sender<ConfigChange>,
+    control_rx: mpsc::Receiver<ConfigChange>,
+    shutdown: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    tick_interval_ms: Arc<AtomicU64>,
     peer_threads: Vec<std::thread::JoinHandle<()>>,
     listener_thread: Option<std::thread::JoinHandle<()>>,
     local_addr: SocketAddr,
@@ -129,6 +141,7 @@ impl<Store: Storage> RaftDriver<Store> {
     ) -> std::io::Result<Self> {
         let active_connections = Arc::new(Mutex::new(Vec::new()));
         let (sender, receiver) = mpsc::channel();
+        let (control_tx, control_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let tick_interval_ms = Arc::new(AtomicU64::new(10)); // Default to 10ms
@@ -340,6 +353,8 @@ impl<Store: Storage> RaftDriver<Store> {
         Ok(Self {
             node,
             receiver,
+            control_tx,
+            control_rx,
             shutdown,
             paused,
             tick_interval_ms,
@@ -357,7 +372,7 @@ impl<Store: Storage> RaftDriver<Store> {
 
     /// Signals the driver and all background connection threads to shut down.
     pub fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = self.control_tx.send(ConfigChange::Shutdown(true));
     }
 
     fn get_state_event(&self) -> DriverEvent {
@@ -397,6 +412,43 @@ impl<Store: Storage> RaftDriver<Store> {
         }
 
         while !self.shutdown.load(Ordering::Relaxed) {
+            // Process control changes
+            while let Ok(change) = self.control_rx.try_recv() {
+                match change {
+                    ConfigChange::Shutdown(val) => {
+                        self.shutdown.store(val, Ordering::Relaxed);
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx.send(DriverEvent::Shutdown {
+                                id: u64::from(self.node.id),
+                                shutdown: val,
+                            });
+                        }
+                    }
+                    ConfigChange::Pause(val) => {
+                        self.paused.store(val, Ordering::Relaxed);
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx.send(DriverEvent::Paused {
+                                id: u64::from(self.node.id),
+                                paused: val,
+                            });
+                        }
+                    }
+                    ConfigChange::TickInterval(val) => {
+                        self.tick_interval_ms.store(val, Ordering::Relaxed);
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx.send(DriverEvent::TickInterval {
+                                id: u64::from(self.node.id),
+                                interval_ms: val,
+                            });
+                        }
+                    }
+                }
+            }
+
+            if self.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+
             // Simulated crash/partition behavior
             if self.paused.load(Ordering::Relaxed) {
                 // Drain any incoming messages in the channel to simulate packet loss while offline
@@ -558,13 +610,13 @@ mod tests {
         let _addr = driver.local_addr();
 
         // Run the driver in a background thread and then shut it down
-        let shutdown_flag = Arc::clone(&driver.shutdown);
+        let control_tx = driver.control_tx.clone();
         let handle = std::thread::spawn(move || {
             driver.run().unwrap();
         });
 
         std::thread::sleep(Duration::from_millis(50));
-        shutdown_flag.store(true, Ordering::Relaxed);
+        control_tx.send(ConfigChange::Shutdown(true)).unwrap();
         handle.join().unwrap();
     }
 }
