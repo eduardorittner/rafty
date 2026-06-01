@@ -4,10 +4,10 @@ use std::sync::mpsc::channel;
 use proto::proto::ProtoMessage;
 use raft::{InitialConfig, Node, NodeId, ValidNodeId};
 
-use crate::{FaultRate, FaultyChannel, MemStorage, NO_FAULT, TestChannel};
+use crate::{FaultRate, FaultyChannel, MemStorage, NO_FAULT, TestChannel, TestNode};
 
 pub struct Cluster {
-    pub nodes: Vec<Node<MemStorage, TestChannel>>,
+    pub nodes: Vec<TestNode>,
 }
 
 impl Cluster {
@@ -48,13 +48,13 @@ impl Cluster {
     }
 
     /// Adds a node to the cluster, ensuring that the `nodes` vector remains sorted by ID.
-    pub fn add(&mut self, node: Node<MemStorage, TestChannel>) {
+    pub fn add(&mut self, node: TestNode) {
         self.nodes.push(node);
         self.nodes.sort_by_key(|n| u64::from(n.id));
     }
 
     /// Removes a node from the cluster by its ID.
-    pub fn remove(&mut self, id: u64) -> Node<MemStorage, TestChannel> {
+    pub fn remove(&mut self, id: u64) -> TestNode {
         let pos = self
             .nodes
             .iter()
@@ -96,7 +96,7 @@ impl Cluster {
 
     pub fn assert<P>(&self, mut predicate: P)
     where
-        P: FnMut(&Node<MemStorage, TestChannel>) -> bool,
+        P: FnMut(&TestNode) -> bool,
     {
         for node in &self.nodes {
             assert!(predicate(node));
