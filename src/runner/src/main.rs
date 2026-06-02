@@ -119,10 +119,18 @@ struct NodeActionResponse {
     paused: bool,
 }
 
+struct SseClient {
+    tx: mpsc::Sender<String>,
+    send_all: bool,
+}
+
 enum VisualizerMessage {
     DriverEvent(driver::DriverEvent),
     GetState(mpsc::Sender<String>),
-    RegisterSseClient(mpsc::Sender<String>),
+    RegisterSseClient {
+        tx: mpsc::Sender<String>,
+        send_all: bool,
+    },
     RestartCluster(mpsc::Sender<()>),
     SetTickRate(u64, mpsc::Sender<bool>),
     ToggleOrRestartNode(u64, mpsc::Sender<Result<NodeActionResponse, ()>>),
@@ -324,7 +332,7 @@ struct VisualizerActor {
     peer_addresses: Arc<Vec<Option<String>>>,
     event_tx: mpsc::Sender<driver::DriverEvent>,
     actor_rx: mpsc::Receiver<VisualizerMessage>,
-    sse_clients: Vec<mpsc::Sender<String>>,
+    sse_clients: Vec<SseClient>,
     dirty: bool,
 }
 
@@ -350,9 +358,19 @@ impl VisualizerActor {
 
     fn broadcast_state(&mut self) {
         self.update_crashed_nodes();
-        let json_data = serde_json::to_string(&self.state).unwrap();
-        self.sse_clients
-            .retain(|tx| tx.send(json_data.clone()).is_ok());
+        let json_all = serde_json::to_string(&self.state).unwrap();
+        let mut state_no_messages = self.state.clone();
+        state_no_messages.messages.clear();
+        let json_limited = serde_json::to_string(&state_no_messages).unwrap();
+
+        self.sse_clients.retain(|client| {
+            let data = if client.send_all {
+                &json_all
+            } else {
+                &json_limited
+            };
+            client.tx.send(data.clone()).is_ok()
+        });
     }
 
     fn run(mut self) {
@@ -433,10 +451,16 @@ impl VisualizerActor {
                     let json_data = serde_json::to_string(&self.state).unwrap();
                     let _ = resp_tx.send(json_data);
                 }
-                VisualizerMessage::RegisterSseClient(resp_tx) => {
-                    let json_data = serde_json::to_string(&self.state).unwrap();
-                    let _ = resp_tx.send(json_data);
-                    self.sse_clients.push(resp_tx);
+                VisualizerMessage::RegisterSseClient { tx, send_all } => {
+                    let json_data = if send_all {
+                        serde_json::to_string(&self.state).unwrap()
+                    } else {
+                        let mut state_no_messages = self.state.clone();
+                        state_no_messages.messages.clear();
+                        serde_json::to_string(&state_no_messages).unwrap()
+                    };
+                    let _ = tx.send(json_data);
+                    self.sse_clients.push(SseClient { tx, send_all });
                 }
                 VisualizerMessage::RestartCluster(resp_tx) => {
                     actor_restart_cluster(
@@ -557,10 +581,9 @@ impl std::io::Read for SseReader {
 fn handle_http_connection(request: tiny_http::Request, actor_tx: mpsc::Sender<VisualizerMessage>) {
     let url = request.url().to_string();
     if url.starts_with("/api/state/sse") {
+        let send_all = url.starts_with("/api/state/sse/all");
         let (tx, rx) = mpsc::channel();
-        if actor_tx
-            .send(VisualizerMessage::RegisterSseClient(tx))
-            .is_ok()
+        if actor_tx.send(VisualizerMessage::RegisterSseClient { tx, send_all }).is_ok()
         {
             let sse_reader = SseReader {
                 rx,

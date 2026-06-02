@@ -348,20 +348,27 @@
                 </div>
             </div>
 
+            <!-- Message Trace Log Panel (Collapsible, default hidden) -->
+            <div class="event-log-container" style="background: rgba(30, 30, 50, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 15px; max-height: none; flex-grow: 0;">
+                <h3 class="pane-title" onclick="toggleMessageLog()" style="cursor: pointer; display: flex; align-items: center; justify-content: space-between; width: 100%; user-select: none;">
+                    <span style="display: flex; align-items: center; gap: 8px;">
+                        <span id="log-toggle-arrow" style="display: inline-block; transition: transform 0.2s; transform: rotate(-90deg);">&#9662;</span>
+                        Message Trace Log
+                    </span>
+                    <span id="log-status-badge" style="font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; text-transform: uppercase; background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); transition: all 0.2s;">Disabled</span>
+                </h3>
+                <div id="event-log-body" style="display: none; flex-direction: column; gap: 15px;">
+                    <div style="font-size:12px; font-weight:normal; color:#64748b;">showing last 50</div>
+                    <div class="event-log" id="event-log-container" style="height: 180px; max-height: 180px;">
+                        <!-- Dynamic Event Logs -->
+                    </div>
+                </div>
+            </div>
+
             <div>
                 <h3 class="pane-title" style="margin-bottom: 20px;">Cluster Nodes</h3>
                 <div class="node-list" id="node-list-container">
                     <!-- Dynamic Node Cards -->
-                </div>
-            </div>
-
-            <div class="event-log-container">
-                <h3 class="pane-title">
-                    Message Trace Log
-                    <span style="font-size:12px; font-weight:normal; color:#64748b;">showing last 50</span>
-                </h3>
-                <div class="event-log" id="event-log-container">
-                    <!-- Dynamic Event Logs -->
                 </div>
             </div>
         </div>
@@ -372,6 +379,9 @@
         const activeConnections = {};
         let lastEventTimestamp = 0;
         const animationPaths = {};
+        let eventSource = null;
+        let isInitialSsePayload = true;
+        let messageLogOpen = false;
 
         // Calculate Circle Positions
         const cx = 300;
@@ -680,32 +690,88 @@
             });
 
             // Process new messages
-            data.messages.forEach(msg => {
-                if (msg.timestamp > lastEventTimestamp) {
-                    const details = `${msg.msg_type} (T:${msg.term})`;
-                    if (msg.from !== 0 && msg.to !== 0) {
-                        animatePacket(msg.from, msg.to, msg.msg_type);
-                        addLog(`Node ${msg.from} &rarr; Node ${msg.to}: ${details}`, 'sent');
-                    }
-                    
-                    lastEventTimestamp = Math.max(lastEventTimestamp, msg.timestamp);
+            if (data.messages && data.messages.length > 0) {
+                if (isInitialSsePayload) {
+                    // Populate trace log without animating packets
+                    data.messages.forEach(msg => {
+                        const details = `${msg.msg_type} (T:${msg.term})`;
+                        if (msg.from !== 0 && msg.to !== 0) {
+                            addLog(`Node ${msg.from} &rarr; Node ${msg.to}: ${details}`, 'sent');
+                        }
+                        lastEventTimestamp = Math.max(lastEventTimestamp, msg.timestamp);
+                    });
+                } else {
+                    data.messages.forEach(msg => {
+                        if (msg.timestamp > lastEventTimestamp) {
+                            const details = `${msg.msg_type} (T:${msg.term})`;
+                            if (msg.from !== 0 && msg.to !== 0) {
+                                animatePacket(msg.from, msg.to, msg.msg_type);
+                                addLog(`Node ${msg.from} &rarr; Node ${msg.to}: ${details}`, 'sent');
+                            }
+                            lastEventTimestamp = Math.max(lastEventTimestamp, msg.timestamp);
+                        }
+                    });
                 }
-            });
+            }
+            isInitialSsePayload = false;
+        }
+
+        function connectSSE(showAll) {
+            if (eventSource) {
+                eventSource.close();
+            }
+            isInitialSsePayload = true;
+            const path = showAll ? '/api/state/sse/all' : '/api/state/sse';
+            console.log(`Connecting SSE to ${path}...`);
+            eventSource = new EventSource(path);
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                renderUI(data);
+            };
+            eventSource.onerror = function(err) {
+                console.error("SSE connection error, retrying...", err);
+            };
+        }
+
+        function toggleMessageLog() {
+            messageLogOpen = !messageLogOpen;
+            const body = document.getElementById('event-log-body');
+            const arrow = document.getElementById('log-toggle-arrow');
+            const badge = document.getElementById('log-status-badge');
+            
+            if (messageLogOpen) {
+                body.style.display = 'flex';
+                arrow.style.transform = 'rotate(0deg)';
+                badge.textContent = 'Active';
+                badge.style.background = 'rgba(16, 185, 129, 0.15)';
+                badge.style.color = '#34d399';
+                badge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                
+                // Reconnect SSE with all events (messages included)
+                connectSSE(true);
+            } else {
+                body.style.display = 'none';
+                arrow.style.transform = 'rotate(-90deg)';
+                badge.textContent = 'Disabled';
+                badge.style.background = 'rgba(239, 68, 68, 0.15)';
+                badge.style.color = '#f87171';
+                badge.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+                
+                // Clear the logs/packets to be clean
+                document.getElementById('event-log-container').innerHTML = '';
+                document.getElementById('packets-group').innerHTML = '';
+                
+                // Reconnect SSE without messages
+                connectSSE(false);
+            }
         }
 
         // Initialize UI
         setupConnections(5);
         createNodeGraphics(5);
 
-        // Connect to Server-Sent Events stream
-        const eventSource = new EventSource('/api/state/sse');
-        eventSource.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-            renderUI(data);
-        };
-        eventSource.onerror = function(err) {
-            console.error("SSE connection error, retrying...", err);
-        };
+        // Connect initially to standard SSE without messages
+        connectSSE(false);
     </script>
 </body>
 </html>
