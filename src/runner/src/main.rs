@@ -126,6 +126,7 @@ enum VisualizerMessage {
     RestartCluster(mpsc::Sender<()>),
     SetTickRate(u64, mpsc::Sender<bool>),
     ToggleOrRestartNode(u64, mpsc::Sender<Result<NodeActionResponse, ()>>),
+    Broadcast,
 }
 
 /// Helper function to reconstruct a panicked/crashed driver thread.
@@ -324,6 +325,7 @@ struct VisualizerActor {
     event_tx: mpsc::Sender<driver::DriverEvent>,
     actor_rx: mpsc::Receiver<VisualizerMessage>,
     sse_clients: Vec<mpsc::Sender<String>>,
+    dirty: bool,
 }
 
 impl VisualizerActor {
@@ -356,10 +358,9 @@ impl VisualizerActor {
 
     fn run(mut self) {
         while let Ok(msg) = self.actor_rx.recv() {
-            let mut should_broadcast = false;
             match msg {
                 VisualizerMessage::DriverEvent(event) => {
-                    should_broadcast = true;
+                    self.dirty = true;
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -443,7 +444,7 @@ impl VisualizerActor {
                         &mut self.state,
                     );
                     let _ = resp_tx.send(());
-                    should_broadcast = true;
+                    self.dirty = true;
                 }
                 VisualizerMessage::SetTickRate(ms, resp_tx) => {
                     for ctrl_opt in self.node_controls.iter_mut() {
@@ -453,7 +454,7 @@ impl VisualizerActor {
                     }
                     self.state.tick_rate_ms = ms;
                     let _ = resp_tx.send(true);
-                    should_broadcast = true;
+                    self.dirty = true;
                 }
                 VisualizerMessage::ToggleOrRestartNode(node_id, resp_tx) => {
                     let is_crashed = if let Some(ctrl) = self.node_controls.get(node_id as usize).and_then(|c| c.as_ref()) {
@@ -476,7 +477,7 @@ impl VisualizerActor {
                             action: "restarted".to_string(),
                             paused: false,
                         }));
-                        should_broadcast = true;
+                        self.dirty = true;
                     } else if let Some(ctrl) = self.node_controls.get(node_id as usize).and_then(|c| c.as_ref()) {
                         let prev = self.state.nodes[node_id as usize].as_ref().map(|n| n.paused).unwrap_or(false);
                         let _ = ctrl.control_tx.send(driver::ConfigChange::Pause(!prev));
@@ -490,15 +491,17 @@ impl VisualizerActor {
                             action: "toggle".to_string(),
                             paused: !prev,
                         }));
-                        should_broadcast = true;
+                        self.dirty = true;
                     } else {
                         let _ = resp_tx.send(Err(()));
                     }
                 }
-            }
-
-            if should_broadcast {
-                self.broadcast_state();
+                VisualizerMessage::Broadcast => {
+                    if self.dirty {
+                        self.broadcast_state();
+                        self.dirty = false;
+                    }
+                }
             }
         }
     }
@@ -752,9 +755,21 @@ fn main() {
         event_tx: event_tx.clone(),
         actor_rx,
         sse_clients: Vec::new(),
+        dirty: false,
     };
     std::thread::spawn(move || {
         actor.run();
+    });
+
+    // Spawn the background broadcast timer thread (emits a tick every 50ms)
+    let actor_tx_timer = actor_tx.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if actor_tx_timer.send(VisualizerMessage::Broadcast).is_err() {
+                break;
+            }
+        }
     });
 
     // Start HTTP Server for the visualizer
