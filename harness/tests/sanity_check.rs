@@ -23,7 +23,9 @@ fn inter_node_communication() {
 
     for from in 1..=TEST_CLUSTER_SIZE {
         for to in 1..=TEST_CLUSTER_SIZE {
-            cluster.nodes[from as usize - 1].channel.send(heartbeat(from, to));
+            cluster.nodes[from as usize - 1]
+                .channel
+                .send(heartbeat(from, to));
         }
     }
 

@@ -27,9 +27,18 @@ pub enum DriverEvent {
         leader_id: u64,
         role: String,
     },
-    Shutdown { id: u64, shutdown: bool },
-    Paused { id: u64, paused: bool },
-    TickInterval { id: u64, interval_ms: u64 },
+    Shutdown {
+        id: u64,
+        shutdown: bool,
+    },
+    Paused {
+        id: u64,
+        paused: bool,
+    },
+    TickInterval {
+        id: u64,
+        interval_ms: u64,
+    },
 }
 
 /// Reads a length-prefixed `ProtoMessage` from a reader.
@@ -239,7 +248,11 @@ impl<Store: Storage> RaftDriver<Store> {
                 let etx = event_tx.clone();
                 let handle = std::thread::spawn(move || {
                     while !sh.load(Ordering::Relaxed) {
-                        tracing::debug!("Attempting to connect to peer {} at {}", peer_id, peer_addr);
+                        tracing::debug!(
+                            "Attempting to connect to peer {} at {}",
+                            peer_id,
+                            peer_addr
+                        );
                         match TcpStream::connect(&peer_addr) {
                             Ok(stream) => {
                                 if let Err(e) = stream.set_nodelay(true) {
@@ -285,8 +298,9 @@ impl<Store: Storage> RaftDriver<Store> {
                                                 continue;
                                             }
                                             if let Some(ref tx) = etx {
-                                                let _ =
-                                                    tx.send(DriverEvent::MessageReceived(msg.clone()));
+                                                let _ = tx.send(DriverEvent::MessageReceived(
+                                                    msg.clone(),
+                                                ));
                                             }
                                             if let Err(_) = s.send(msg) {
                                                 break; // Receiver disconnected

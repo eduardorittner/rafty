@@ -351,9 +351,8 @@ impl VisualizerActor {
     fn broadcast_state(&mut self) {
         self.update_crashed_nodes();
         let json_data = serde_json::to_string(&self.state).unwrap();
-        self.sse_clients.retain(|tx| {
-            tx.send(json_data.clone()).is_ok()
-        });
+        self.sse_clients
+            .retain(|tx| tx.send(json_data.clone()).is_ok());
     }
 
     fn run(mut self) {
@@ -369,14 +368,18 @@ impl VisualizerActor {
                     match event {
                         driver::DriverEvent::MessageSent(msg) => {
                             let msg_type = match msg.msg_type() {
-                                proto::proto::ProtoMessageType::Heartbeat => "Heartbeat".to_string(),
+                                proto::proto::ProtoMessageType::Heartbeat => {
+                                    "Heartbeat".to_string()
+                                }
                                 proto::proto::ProtoMessageType::AppendEntries => {
                                     "AppendEntries".to_string()
                                 }
                                 proto::proto::ProtoMessageType::AppendEntriesResponse => {
                                     "AppendEntriesResponse".to_string()
                                 }
-                                proto::proto::ProtoMessageType::RequestVote => "RequestVote".to_string(),
+                                proto::proto::ProtoMessageType::RequestVote => {
+                                    "RequestVote".to_string()
+                                }
                                 proto::proto::ProtoMessageType::RequestVoteResponse => {
                                     "RequestVoteResponse".to_string()
                                 }
@@ -457,8 +460,15 @@ impl VisualizerActor {
                     self.dirty = true;
                 }
                 VisualizerMessage::ToggleOrRestartNode(node_id, resp_tx) => {
-                    let is_crashed = if let Some(ctrl) = self.node_controls.get(node_id as usize).and_then(|c| c.as_ref()) {
-                        ctrl.join_handle.as_ref().map(|h| h.is_finished()).unwrap_or(false)
+                    let is_crashed = if let Some(ctrl) = self
+                        .node_controls
+                        .get(node_id as usize)
+                        .and_then(|c| c.as_ref())
+                    {
+                        ctrl.join_handle
+                            .as_ref()
+                            .map(|h| h.is_finished())
+                            .unwrap_or(false)
                     } else {
                         false
                     };
@@ -478,8 +488,15 @@ impl VisualizerActor {
                             paused: false,
                         }));
                         self.dirty = true;
-                    } else if let Some(ctrl) = self.node_controls.get(node_id as usize).and_then(|c| c.as_ref()) {
-                        let prev = self.state.nodes[node_id as usize].as_ref().map(|n| n.paused).unwrap_or(false);
+                    } else if let Some(ctrl) = self
+                        .node_controls
+                        .get(node_id as usize)
+                        .and_then(|c| c.as_ref())
+                    {
+                        let prev = self.state.nodes[node_id as usize]
+                            .as_ref()
+                            .map(|n| n.paused)
+                            .unwrap_or(false);
                         let _ = ctrl.control_tx.send(driver::ConfigChange::Pause(!prev));
 
                         if let Some(ref mut node_state) = self.state.nodes[node_id as usize] {
@@ -541,7 +558,10 @@ fn handle_http_connection(request: tiny_http::Request, actor_tx: mpsc::Sender<Vi
     let url = request.url().to_string();
     if url.starts_with("/api/state/sse") {
         let (tx, rx) = mpsc::channel();
-        if actor_tx.send(VisualizerMessage::RegisterSseClient(tx)).is_ok() {
+        if actor_tx
+            .send(VisualizerMessage::RegisterSseClient(tx))
+            .is_ok()
+        {
             let sse_reader = SseReader {
                 rx,
                 buffer: Vec::new(),
@@ -565,8 +585,12 @@ fn handle_http_connection(request: tiny_http::Request, actor_tx: mpsc::Sender<Vi
         if actor_tx.send(VisualizerMessage::GetState(tx)).is_ok() {
             if let Ok(json_data) = rx.recv() {
                 let response = Response::from_string(json_data)
-                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
-                    .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                    .with_header(
+                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                    )
+                    .with_header(
+                        Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
+                    );
                 let _ = request.respond(response);
             }
         }
@@ -576,8 +600,12 @@ fn handle_http_connection(request: tiny_http::Request, actor_tx: mpsc::Sender<Vi
             let _ = rx.recv();
             let response_body = "{\"success\":true}";
             let response = Response::from_string(response_body)
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
-                .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
+                );
             let _ = request.respond(response);
         }
     } else if url.starts_with("/api/cluster/tick_rate") {
@@ -587,12 +615,28 @@ fn handle_http_connection(request: tiny_http::Request, actor_tx: mpsc::Sender<Vi
             if let Ok(ms) = val_clean.parse::<u64>() {
                 if ms >= 250 && ms <= 1000 {
                     let (tx, rx) = mpsc::channel();
-                    if actor_tx.send(VisualizerMessage::SetTickRate(ms, tx)).is_ok() {
+                    if actor_tx
+                        .send(VisualizerMessage::SetTickRate(ms, tx))
+                        .is_ok()
+                    {
                         if let Ok(true) = rx.recv() {
-                            let response_body = format!("{{\"success\":true,\"tick_rate_ms\":{}}}", ms);
+                            let response_body =
+                                format!("{{\"success\":true,\"tick_rate_ms\":{}}}", ms);
                             let response = Response::from_string(response_body)
-                                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
-                                .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                                .with_header(
+                                    Header::from_bytes(
+                                        &b"Content-Type"[..],
+                                        &b"application/json"[..],
+                                    )
+                                    .unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        &b"Access-Control-Allow-Origin"[..],
+                                        &b"*"[..],
+                                    )
+                                    .unwrap(),
+                                );
                             let _ = request.respond(response);
                             return;
                         }
@@ -607,12 +651,21 @@ fn handle_http_connection(request: tiny_http::Request, actor_tx: mpsc::Sender<Vi
         if segments.len() >= 4 && segments[2] == "node" {
             if let Ok(node_id) = segments[3].parse::<u64>() {
                 let (tx, rx) = mpsc::channel();
-                if actor_tx.send(VisualizerMessage::ToggleOrRestartNode(node_id, tx)).is_ok() {
+                if actor_tx
+                    .send(VisualizerMessage::ToggleOrRestartNode(node_id, tx))
+                    .is_ok()
+                {
                     if let Ok(Ok(res)) = rx.recv() {
                         let response_body = serde_json::to_string(&res).unwrap();
                         let response = Response::from_string(response_body)
-                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
-                            .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                            .with_header(
+                                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                    .unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..])
+                                    .unwrap(),
+                            );
                         let _ = request.respond(response);
                         return;
                     }
