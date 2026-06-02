@@ -331,13 +331,13 @@
                 <div style="display: flex; flex-direction: column; gap: 10px;">
                     <div style="display: flex; justify-content: space-between; font-size: 14px; color: #94a3b8;">
                         <span>Simulation Tick Rate</span>
-                        <span><span id="tick-rate-val">100</span>ms</span>
+                        <span><span id="tick-rate-val">500</span>ms</span>
                     </div>
-                    <input type="range" id="tick-rate-slider" min="10" max="1000" step="10" value="10" 
+                    <input type="range" id="tick-rate-slider" min="250" max="1000" step="50" value="500" 
                            oninput="changeTickRate(this.value)"
                            style="width: 100%; accent-color: #6366f1; cursor: pointer; background: #1e1e32; border-radius: 6px; height: 6px; appearance: none; outline: none;">
                     <div style="display: flex; justify-content: space-between; font-size: 10px; color: #64748b; font-family: 'JetBrains Mono', monospace;">
-                        <span>Fast (10ms)</span>
+                        <span>Fast (250ms)</span>
                         <span>Slow (1000ms)</span>
                     </div>
                     

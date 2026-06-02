@@ -1,6 +1,5 @@
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, mpsc};
+use tiny_http::{Header, Response, StatusCode};
 
 use proto::proto::Entry;
 use raft::Storage;
@@ -350,8 +349,9 @@ impl VisualizerActor {
     fn broadcast_state(&mut self) {
         self.update_crashed_nodes();
         let json_data = serde_json::to_string(&self.state).unwrap();
-        self.sse_clients
-            .retain(|tx| tx.send(json_data.clone()).is_ok());
+        self.sse_clients.retain(|tx| {
+            tx.send(json_data.clone()).is_ok()
+        });
     }
 
     fn run(mut self) {
@@ -368,18 +368,14 @@ impl VisualizerActor {
                     match event {
                         driver::DriverEvent::MessageSent(msg) => {
                             let msg_type = match msg.msg_type() {
-                                proto::proto::ProtoMessageType::Heartbeat => {
-                                    "Heartbeat".to_string()
-                                }
+                                proto::proto::ProtoMessageType::Heartbeat => "Heartbeat".to_string(),
                                 proto::proto::ProtoMessageType::AppendEntries => {
                                     "AppendEntries".to_string()
                                 }
                                 proto::proto::ProtoMessageType::AppendEntriesResponse => {
                                     "AppendEntriesResponse".to_string()
                                 }
-                                proto::proto::ProtoMessageType::RequestVote => {
-                                    "RequestVote".to_string()
-                                }
+                                proto::proto::ProtoMessageType::RequestVote => "RequestVote".to_string(),
                                 proto::proto::ProtoMessageType::RequestVoteResponse => {
                                     "RequestVoteResponse".to_string()
                                 }
@@ -392,7 +388,6 @@ impl VisualizerActor {
                                 timestamp,
                             });
 
-                            // Keep message logs bounded in state
                             if self.state.messages.len() > 300 {
                                 self.state.messages.remove(0);
                             }
@@ -461,15 +456,8 @@ impl VisualizerActor {
                     should_broadcast = true;
                 }
                 VisualizerMessage::ToggleOrRestartNode(node_id, resp_tx) => {
-                    let is_crashed = if let Some(ctrl) = self
-                        .node_controls
-                        .get(node_id as usize)
-                        .and_then(|c| c.as_ref())
-                    {
-                        ctrl.join_handle
-                            .as_ref()
-                            .map(|h| h.is_finished())
-                            .unwrap_or(false)
+                    let is_crashed = if let Some(ctrl) = self.node_controls.get(node_id as usize).and_then(|c| c.as_ref()) {
+                        ctrl.join_handle.as_ref().map(|h| h.is_finished()).unwrap_or(false)
                     } else {
                         false
                     };
@@ -489,15 +477,8 @@ impl VisualizerActor {
                             paused: false,
                         }));
                         should_broadcast = true;
-                    } else if let Some(ctrl) = self
-                        .node_controls
-                        .get(node_id as usize)
-                        .and_then(|c| c.as_ref())
-                    {
-                        let prev = self.state.nodes[node_id as usize]
-                            .as_ref()
-                            .map(|n| n.paused)
-                            .unwrap_or(false);
+                    } else if let Some(ctrl) = self.node_controls.get(node_id as usize).and_then(|c| c.as_ref()) {
+                        let prev = self.state.nodes[node_id as usize].as_ref().map(|n| n.paused).unwrap_or(false);
                         let _ = ctrl.control_tx.send(driver::ConfigChange::Pause(!prev));
 
                         if let Some(ref mut node_state) = self.state.nodes[node_id as usize] {
@@ -523,124 +504,131 @@ impl VisualizerActor {
     }
 }
 
-fn handle_http_connection(mut stream: TcpStream, actor_tx: mpsc::Sender<VisualizerMessage>) {
-    let mut buffer = [0; 4096];
-    let n = match stream.read(&mut buffer) {
-        Ok(n) => n,
-        Err(_) => return,
-    };
-    let request = String::from_utf8_lossy(&buffer[..n]);
+struct SseReader {
+    rx: mpsc::Receiver<String>,
+    buffer: Vec<u8>,
+}
 
-    if request.starts_with("GET /api/state/sse") {
-        let (tx, rx) = mpsc::channel();
-        if actor_tx
-            .send(VisualizerMessage::RegisterSseClient(tx))
-            .is_ok()
-        {
-            let headers = "HTTP/1.1 200 OK\r\n\
-                           Content-Type: text/event-stream\r\n\
-                           Cache-Control: no-cache\r\n\
-                           Connection: keep-alive\r\n\
-                           Access-Control-Allow-Origin: *\r\n\r\n";
-            if stream.write_all(headers.as_bytes()).is_ok() {
-                while let Ok(json_data) = rx.recv() {
-                    let event_str = format!("data: {}\n\n", json_data);
-                    if stream.write_all(event_str.as_bytes()).is_err() {
-                        break; // Client disconnected
-                    }
-                }
-            }
+impl std::io::Read for SseReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if !self.buffer.is_empty() {
+            let len = std::cmp::min(buf.len(), self.buffer.len());
+            buf[..len].copy_from_slice(&self.buffer[..len]);
+            self.buffer.drain(..len);
+            return Ok(len);
         }
-    } else if request.starts_with("GET /api/state") {
+
+        match self.rx.recv() {
+            Ok(json_data) => {
+                let event_str = format!("data: {}\n\n", json_data);
+                let bytes = event_str.into_bytes();
+                let len = std::cmp::min(buf.len(), bytes.len());
+                buf[..len].copy_from_slice(&bytes[..len]);
+                if len < bytes.len() {
+                    self.buffer.extend_from_slice(&bytes[len..]);
+                }
+                Ok(len)
+            }
+            Err(_) => Ok(0),
+        }
+    }
+}
+
+fn handle_http_connection(request: tiny_http::Request, actor_tx: mpsc::Sender<VisualizerMessage>) {
+    let url = request.url().to_string();
+    if url.starts_with("/api/state/sse") {
+        let (tx, rx) = mpsc::channel();
+        if actor_tx.send(VisualizerMessage::RegisterSseClient(tx)).is_ok() {
+            let sse_reader = SseReader {
+                rx,
+                buffer: Vec::new(),
+            };
+            let response = Response::new(
+                StatusCode(200),
+                vec![
+                    Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..]).unwrap(),
+                    Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap(),
+                    Header::from_bytes(&b"Connection"[..], &b"keep-alive"[..]).unwrap(),
+                    Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap(),
+                ],
+                sse_reader,
+                None,
+                None,
+            );
+            let _ = request.respond(response);
+        }
+    } else if url.starts_with("/api/state") {
         let (tx, rx) = mpsc::channel();
         if actor_tx.send(VisualizerMessage::GetState(tx)).is_ok() {
             if let Ok(json_data) = rx.recv() {
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                    json_data.len(),
-                    json_data
-                );
-                let _ = stream.write_all(response.as_bytes());
+                let response = Response::from_string(json_data)
+                    .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                    .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                let _ = request.respond(response);
             }
         }
-    } else if request.starts_with("POST /api/cluster/restart") {
+    } else if url.starts_with("/api/cluster/restart") {
         let (tx, rx) = mpsc::channel();
         if actor_tx.send(VisualizerMessage::RestartCluster(tx)).is_ok() {
             let _ = rx.recv();
             let response_body = "{\"success\":true}";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            let _ = stream.write_all(response.as_bytes());
+            let response = Response::from_string(response_body)
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+            let _ = request.respond(response);
         }
-    } else if request.starts_with("POST /api/cluster/tick_rate") {
-        if let Some(pos) = request.find("value=") {
-            let val_str = request[pos + 6..].split_whitespace().next().unwrap_or("");
+    } else if url.starts_with("/api/cluster/tick_rate") {
+        if let Some(pos) = url.find("value=") {
+            let val_str = url[pos + 6..].split_whitespace().next().unwrap_or("");
             let val_clean: String = val_str.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(ms) = val_clean.parse::<u64>() {
-                if ms >= 5 && ms <= 5000 {
+                if ms >= 250 && ms <= 1000 {
                     let (tx, rx) = mpsc::channel();
-                    if actor_tx
-                        .send(VisualizerMessage::SetTickRate(ms, tx))
-                        .is_ok()
-                    {
+                    if actor_tx.send(VisualizerMessage::SetTickRate(ms, tx)).is_ok() {
                         if let Ok(true) = rx.recv() {
-                            let response_body =
-                                format!("{{\"success\":true,\"tick_rate_ms\":{}}}", ms);
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                                response_body.len(),
-                                response_body
-                            );
-                            let _ = stream.write_all(response.as_bytes());
+                            let response_body = format!("{{\"success\":true,\"tick_rate_ms\":{}}}", ms);
+                            let response = Response::from_string(response_body)
+                                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                                .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                            let _ = request.respond(response);
                             return;
                         }
                     }
                 }
             }
         }
-        let response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
-        let _ = stream.write_all(response.as_bytes());
-    } else if request.starts_with("POST /api/node/") {
-        let parts: Vec<&str> = request.split_whitespace().collect();
-        if !parts.is_empty() {
-            let path = parts[1];
-            let segments: Vec<&str> = path.split('/').collect();
-            if segments.len() >= 4 && segments[2] == "node" {
-                if let Ok(node_id) = segments[3].parse::<u64>() {
-                    let (tx, rx) = mpsc::channel();
-                    if actor_tx
-                        .send(VisualizerMessage::ToggleOrRestartNode(node_id, tx))
-                        .is_ok()
-                    {
-                        if let Ok(Ok(res)) = rx.recv() {
-                            let response_body = serde_json::to_string(&res).unwrap();
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                                response_body.len(),
-                                response_body
-                            );
-                            let _ = stream.write_all(response.as_bytes());
-                            return;
-                        }
+        let response = Response::empty(StatusCode(400));
+        let _ = request.respond(response);
+    } else if url.starts_with("/api/node/") {
+        let segments: Vec<&str> = url.split('/').collect();
+        if segments.len() >= 4 && segments[2] == "node" {
+            if let Ok(node_id) = segments[3].parse::<u64>() {
+                let (tx, rx) = mpsc::channel();
+                if actor_tx.send(VisualizerMessage::ToggleOrRestartNode(node_id, tx)).is_ok() {
+                    if let Ok(Ok(res)) = rx.recv() {
+                        let response_body = serde_json::to_string(&res).unwrap();
+                        let response = Response::from_string(response_body)
+                            .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                            .with_header(Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                        let _ = request.respond(response);
+                        return;
                     }
                 }
             }
         }
-        let response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
-        let _ = stream.write_all(response.as_bytes());
-    } else if request.starts_with("GET /") {
-        let headers = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
-            INDEX_HTML.len()
-        );
-        let _ = stream.write_all(headers.as_bytes());
-        let _ = stream.write_all(INDEX_HTML);
+        let response = Response::empty(StatusCode(400));
+        let _ = request.respond(response);
     } else {
-        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-        let _ = stream.write_all(response.as_bytes());
+        let response = Response::new(
+            StatusCode(200),
+            vec![
+                Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap(),
+            ],
+            INDEX_HTML,
+            Some(INDEX_HTML.len()),
+            None,
+        );
+        let _ = request.respond(response);
     }
 }
 
@@ -677,7 +665,7 @@ fn main() {
     let initial_state = ClusterState {
         nodes: initial_nodes,
         messages: Vec::new(),
-        tick_rate_ms: 100,
+        tick_rate_ms: 500,
     };
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -731,7 +719,7 @@ fn main() {
         };
 
         let control_tx = driver.control_tx.clone();
-        let _ = control_tx.send(driver::ConfigChange::TickInterval(100));
+        let _ = control_tx.send(driver::ConfigChange::TickInterval(500));
 
         // Spawn driver running thread
         let node_id = id as u64;
@@ -771,20 +759,16 @@ fn main() {
 
     // Start HTTP Server for the visualizer
     let http_addr = "127.0.0.1:8080";
-    let listener = TcpListener::bind(http_addr).expect("Failed to bind HTTP server");
+    let server = tiny_http::Server::http(http_addr).expect("Failed to bind HTTP server");
     println!("============================================================");
     println!("Raft Cluster Simulator with Recovery and Reset support started!");
     println!("Open your browser and navigate to: http://{}", http_addr);
     println!("============================================================");
 
-    for stream in listener.incoming() {
-        if let Ok(stream) = stream {
-            println!("new connection");
-            let actor_tx_clone = actor_tx.clone();
-
-            std::thread::spawn(move || {
-                handle_http_connection(stream, actor_tx_clone);
-            });
-        }
+    for request in server.incoming_requests() {
+        let actor_tx_clone = actor_tx.clone();
+        std::thread::spawn(move || {
+            handle_http_connection(request, actor_tx_clone);
+        });
     }
 }
