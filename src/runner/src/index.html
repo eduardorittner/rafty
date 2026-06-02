@@ -469,9 +469,7 @@
 
         async function toggleNode(id) {
             try {
-                const response = await fetch(`/api/node/${id}/toggle`, { method: 'POST' });
-                const result = await response.json();
-                updateUI();
+                await fetch(`/api/node/${id}/toggle`, { method: 'POST' });
             } catch (err) {
                 console.error("Failed to toggle node:", err);
             }
@@ -494,8 +492,7 @@
                 return;
             }
             try {
-                const response = await fetch('/api/cluster/restart', { method: 'POST' });
-                const result = await response.json();
+                await fetch('/api/cluster/restart', { method: 'POST' });
                 
                 // Clear the logs and visual packets immediately on client
                 document.getElementById('event-log-container').innerHTML = '';
@@ -503,7 +500,6 @@
                 lastEventTimestamp = Date.now(); // Set to current time to discard queued packets from before restart
                 
                 addLog("Cluster restarted from scratch", "state", "state");
-                updateUI();
             } catch (err) {
                 console.error("Failed to restart cluster:", err);
             }
@@ -553,165 +549,163 @@
             }
         }
 
-        async function updateUI() {
-            try {
-                const response = await fetch('/api/state');
-                const data = await response.json();
-                
-                // Update dynamic tick rate UI if user is not currently interacting with the slider
-                const slider = document.getElementById('tick-rate-slider');
-                const valLabel = document.getElementById('tick-rate-val');
-                if (Date.now() - lastSliderInteraction > 1000 && document.activeElement !== slider) {
-                    slider.value = data.tick_rate_ms;
-                    valLabel.textContent = data.tick_rate_ms;
-                }
+        function renderUI(data) {
+            // Update dynamic tick rate UI if user is not currently interacting with the slider
+            const slider = document.getElementById('tick-rate-slider');
+            const valLabel = document.getElementById('tick-rate-val');
+            if (Date.now() - lastSliderInteraction > 1000 && document.activeElement !== slider) {
+                slider.value = data.tick_rate_ms;
+                valLabel.textContent = data.tick_rate_ms;
+            }
 
-                // Update Node Graphics and Cards
-                const cardContainer = document.getElementById('node-list-container');
+            // Update Node Graphics and Cards
+            const cardContainer = document.getElementById('node-list-container');
 
-                Object.keys(data.nodes).forEach(id => {
-                    const node = data.nodes[id];
-                    if (!node) return;
-                    const graphic = document.getElementById(`node-graphic-${id}`);
-                    const roleText = document.getElementById(`node-role-val-${id}`);
-                    const termText = document.getElementById(`node-term-val-${id}`);
+            Object.keys(data.nodes).forEach(id => {
+                const node = data.nodes[id];
+                if (!node) return;
+                const graphic = document.getElementById(`node-graphic-${id}`);
+                const roleText = document.getElementById(`node-role-val-${id}`);
+                const termText = document.getElementById(`node-term-val-${id}`);
 
-                    if (graphic) {
-                        let roleClass = 'node-offline';
-                        let dispRole = 'Offline';
-                        
-                        if (node.role === 'Crashed') {
-                            dispRole = 'Panicked';
-                            roleClass = 'node-offline';
-                        } else if (node.paused) {
-                            dispRole = 'Offline';
-                            roleClass = 'node-offline';
-                        } else {
-                            dispRole = node.role;
-                            if (node.role === 'Leader') roleClass = 'node-leader';
-                            else if (node.role === 'Candidate') roleClass = 'node-candidate';
-                            else if (node.role === 'Follower') roleClass = 'node-follower';
-                        }
-                        
-                        graphic.setAttribute('class', `node-group ${roleClass}`);
-                        roleText.textContent = dispRole;
-                        termText.textContent = `T: ${node.term}`;
-                    }
-
-                    // Get or create the card element
-                    let card = document.getElementById(`node-card-${id}`);
-                    if (!card) {
-                        card = document.createElement('div');
-                        card.className = 'node-card';
-                        card.id = `node-card-${id}`;
-                        card.innerHTML = `
-                            <div class="node-card-info">
-                                <div class="node-card-id">
-                                    Node ${id}
-                                    <span class="node-card-role" id="node-card-badge-${id}"></span>
-                                </div>
-                                <div class="node-card-details" id="node-card-details-${id}">
-                                    Term: <span></span> | Leader: <span></span> | Voted For: <span></span>
-                                </div>
-                            </div>
-                            <button class="btn-toggle" id="node-card-btn-${id}"></button>
-                        `;
-                        cardContainer.appendChild(card);
-                    }
-
-                    // Update badge
-                    const badge = document.getElementById(`node-card-badge-${id}`);
-                    let roleTextBadge = 'Offline';
-                    let badgeClass = 'role-offline';
-                    let badgeStyle = '';
+                if (graphic) {
+                    let roleClass = 'node-offline';
+                    let dispRole = 'Offline';
+                    
                     if (node.role === 'Crashed') {
-                        roleTextBadge = 'Panicked';
-                        badgeClass = 'role-offline';
-                        badgeStyle = 'background:rgba(239,68,68,0.25); color:#f87171;';
-                    } else if (!node.paused) {
-                        roleTextBadge = node.role;
-                        badgeClass = node.role === 'Leader' ? 'role-leader' : (node.role === 'Candidate' ? 'role-candidate' : 'role-follower');
+                        dispRole = 'Panicked';
+                        roleClass = 'node-offline';
+                    } else if (node.paused) {
+                        dispRole = 'Offline';
+                        roleClass = 'node-offline';
+                    } else {
+                        dispRole = node.role;
+                        if (node.role === 'Leader') roleClass = 'node-leader';
+                        else if (node.role === 'Candidate') roleClass = 'node-candidate';
+                        else if (node.role === 'Follower') roleClass = 'node-follower';
                     }
                     
-                    if (badge.textContent !== roleTextBadge) {
-                        badge.textContent = roleTextBadge;
-                    }
-                    const fullBadgeClass = `node-card-role ${badgeClass}`;
-                    if (badge.className !== fullBadgeClass) {
-                        badge.className = fullBadgeClass;
-                    }
-                    if (badge.getAttribute('style') !== badgeStyle) {
-                        if (badgeStyle) {
-                            badge.setAttribute('style', badgeStyle);
-                        } else {
-                            badge.removeAttribute('style');
-                        }
-                    }
+                    graphic.setAttribute('class', `node-group ${roleClass}`);
+                    roleText.textContent = dispRole;
+                    termText.textContent = `T: ${node.term}`;
+                }
 
-                    // Update details (Term, Leader, Voted For)
-                    const detailsContainer = document.getElementById(`node-card-details-${id}`);
-                    if (detailsContainer) {
-                        const spans = detailsContainer.getElementsByTagName('span');
-                        if (spans.length >= 3) {
-                            const termStr = String(node.term);
-                            const leaderStr = String(node.leader_id || 'None');
-                            const votedStr = String(node.voted_for || 'None');
-                            
-                            if (spans[0].textContent !== termStr) {
-                                spans[0].textContent = termStr;
-                            }
-                            if (spans[1].textContent !== leaderStr) {
-                                spans[1].textContent = leaderStr;
-                            }
-                            if (spans[2].textContent !== votedStr) {
-                                spans[2].textContent = votedStr;
-                            }
-                        }
-                    }
+                // Get or create the card element
+                let card = document.getElementById(`node-card-${id}`);
+                if (!card) {
+                    card = document.createElement('div');
+                    card.className = 'node-card';
+                    card.id = `node-card-${id}`;
+                    card.innerHTML = `
+                        <div class="node-card-info">
+                            <div class="node-card-id">
+                                Node ${id}
+                                <span class="node-card-role" id="node-card-badge-${id}"></span>
+                            </div>
+                            <div class="node-card-details" id="node-card-details-${id}">
+                                Term: <span></span> | Leader: <span></span> | Voted For: <span></span>
+                            </div>
+                        </div>
+                        <button class="btn-toggle" id="node-card-btn-${id}"></button>
+                    `;
+                    cardContainer.appendChild(card);
+                }
 
-                    // Update button
-                    const btn = document.getElementById(`node-card-btn-${id}`);
-                    if (btn) {
-                        const isHeal = node.role === 'Crashed' || node.paused;
-                        const btnText = isHeal ? 'Heal' : 'Kill';
-                        const btnClass = isHeal ? 'btn-recover' : 'btn-kill';
+                // Update badge
+                const badge = document.getElementById(`node-card-badge-${id}`);
+                let roleTextBadge = 'Offline';
+                let badgeClass = 'role-offline';
+                let badgeStyle = '';
+                if (node.role === 'Crashed') {
+                    roleTextBadge = 'Panicked';
+                    badgeClass = 'role-offline';
+                    badgeStyle = 'background:rgba(239,68,68,0.25); color:#f87171;';
+                } else if (!node.paused) {
+                    roleTextBadge = node.role;
+                    badgeClass = node.role === 'Leader' ? 'role-leader' : (node.role === 'Candidate' ? 'role-candidate' : 'role-follower');
+                }
+                
+                if (badge.textContent !== roleTextBadge) {
+                    badge.textContent = roleTextBadge;
+                }
+                const fullBadgeClass = `node-card-role ${badgeClass}`;
+                if (badge.className !== fullBadgeClass) {
+                    badge.className = fullBadgeClass;
+                }
+                if (badge.getAttribute('style') !== badgeStyle) {
+                    if (badgeStyle) {
+                        badge.setAttribute('style', badgeStyle);
+                    } else {
+                        badge.removeAttribute('style');
+                    }
+                }
+
+                // Update details (Term, Leader, Voted For)
+                const detailsContainer = document.getElementById(`node-card-details-${id}`);
+                if (detailsContainer) {
+                    const spans = detailsContainer.getElementsByTagName('span');
+                    if (spans.length >= 3) {
+                        const termStr = String(node.term);
+                        const leaderStr = String(node.leader_id || 'None');
+                        const votedStr = String(node.voted_for || 'None');
                         
-                        if (btn.textContent !== btnText) {
-                            btn.textContent = btnText;
+                        if (spans[0].textContent !== termStr) {
+                            spans[0].textContent = termStr;
                         }
-                        const fullBtnClass = `btn-toggle ${btnClass}`;
-                        if (btn.className !== fullBtnClass) {
-                            btn.className = fullBtnClass;
+                        if (spans[1].textContent !== leaderStr) {
+                            spans[1].textContent = leaderStr;
                         }
-                        btn.onclick = () => toggleNode(id);
+                        if (spans[2].textContent !== votedStr) {
+                            spans[2].textContent = votedStr;
+                        }
                     }
-                });
+                }
 
-                // Process new messages
-                data.messages.forEach(msg => {
-                    if (msg.timestamp > lastEventTimestamp) {
-                        const details = `${msg.msg_type} (T:${msg.term})`;
-                        if (msg.from !== 0 && msg.to !== 0) {
-                            animatePacket(msg.from, msg.to, msg.msg_type);
-                            addLog(`Node ${msg.from} &rarr; Node ${msg.to}: ${details}`, 'sent');
-                        }
-                        
-                        lastEventTimestamp = Math.max(lastEventTimestamp, msg.timestamp);
+                // Update button
+                const btn = document.getElementById(`node-card-btn-${id}`);
+                if (btn) {
+                    const isHeal = node.role === 'Crashed' || node.paused;
+                    const btnText = isHeal ? 'Heal' : 'Kill';
+                    const btnClass = isHeal ? 'btn-recover' : 'btn-kill';
+                    
+                    if (btn.textContent !== btnText) {
+                        btn.textContent = btnText;
                     }
-                });
+                    const fullBtnClass = `btn-toggle ${btnClass}`;
+                    if (btn.className !== fullBtnClass) {
+                        btn.className = fullBtnClass;
+                    }
+                    btn.onclick = () => toggleNode(id);
+                }
+            });
 
-            } catch (err) {
-                console.error("Error fetching state:", err);
-            }
+            // Process new messages
+            data.messages.forEach(msg => {
+                if (msg.timestamp > lastEventTimestamp) {
+                    const details = `${msg.msg_type} (T:${msg.term})`;
+                    if (msg.from !== 0 && msg.to !== 0) {
+                        animatePacket(msg.from, msg.to, msg.msg_type);
+                        addLog(`Node ${msg.from} &rarr; Node ${msg.to}: ${details}`, 'sent');
+                    }
+                    
+                    lastEventTimestamp = Math.max(lastEventTimestamp, msg.timestamp);
+                }
+            });
         }
 
         // Initialize UI
         setupConnections(5);
         createNodeGraphics(5);
-        updateUI();
 
-        // Poll API periodically
-        setInterval(updateUI, 200);
+        // Connect to Server-Sent Events stream
+        const eventSource = new EventSource('/api/state/sse');
+        eventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            renderUI(data);
+        };
+        eventSource.onerror = function(err) {
+            console.error("SSE connection error, retrying...", err);
+        };
     </script>
 </body>
 </html>

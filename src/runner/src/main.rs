@@ -123,6 +123,7 @@ struct NodeActionResponse {
 enum VisualizerMessage {
     DriverEvent(driver::DriverEvent),
     GetState(mpsc::Sender<String>),
+    RegisterSseClient(mpsc::Sender<String>),
     RestartCluster(mpsc::Sender<()>),
     SetTickRate(u64, mpsc::Sender<bool>),
     ToggleOrRestartNode(u64, mpsc::Sender<Result<NodeActionResponse, ()>>),
@@ -323,13 +324,42 @@ struct VisualizerActor {
     peer_addresses: Arc<Vec<Option<String>>>,
     event_tx: mpsc::Sender<driver::DriverEvent>,
     actor_rx: mpsc::Receiver<VisualizerMessage>,
+    sse_clients: Vec<mpsc::Sender<String>>,
 }
 
 impl VisualizerActor {
+    fn update_crashed_nodes(&mut self) {
+        for (id, control_opt) in self.node_controls.iter().enumerate() {
+            if let Some(control) = control_opt {
+                if let Some(ref handle) = control.join_handle {
+                    if handle.is_finished() {
+                        if id < self.state.nodes.len() {
+                            if let Some(ref mut node_state) = self.state.nodes[id] {
+                                if node_state.role != "Crashed" {
+                                    node_state.role = "Crashed".to_string();
+                                    node_state.paused = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn broadcast_state(&mut self) {
+        self.update_crashed_nodes();
+        let json_data = serde_json::to_string(&self.state).unwrap();
+        self.sse_clients
+            .retain(|tx| tx.send(json_data.clone()).is_ok());
+    }
+
     fn run(mut self) {
         while let Ok(msg) = self.actor_rx.recv() {
+            let mut should_broadcast = false;
             match msg {
                 VisualizerMessage::DriverEvent(event) => {
+                    should_broadcast = true;
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
@@ -400,26 +430,14 @@ impl VisualizerActor {
                     }
                 }
                 VisualizerMessage::GetState(resp_tx) => {
-                    // Check liveness of join handles and mark exited threads as Crashed
-                    for (id, control_opt) in self.node_controls.iter().enumerate() {
-                        if let Some(control) = control_opt {
-                            if let Some(ref handle) = control.join_handle {
-                                if handle.is_finished() {
-                                    if id < self.state.nodes.len() {
-                                        if let Some(ref mut node_state) = self.state.nodes[id] {
-                                            if node_state.role != "Crashed" {
-                                                node_state.role = "Crashed".to_string();
-                                                node_state.paused = true;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
+                    self.update_crashed_nodes();
                     let json_data = serde_json::to_string(&self.state).unwrap();
                     let _ = resp_tx.send(json_data);
+                }
+                VisualizerMessage::RegisterSseClient(resp_tx) => {
+                    let json_data = serde_json::to_string(&self.state).unwrap();
+                    let _ = resp_tx.send(json_data);
+                    self.sse_clients.push(resp_tx);
                 }
                 VisualizerMessage::RestartCluster(resp_tx) => {
                     actor_restart_cluster(
@@ -430,6 +448,7 @@ impl VisualizerActor {
                         &mut self.state,
                     );
                     let _ = resp_tx.send(());
+                    should_broadcast = true;
                 }
                 VisualizerMessage::SetTickRate(ms, resp_tx) => {
                     for ctrl_opt in self.node_controls.iter_mut() {
@@ -439,6 +458,7 @@ impl VisualizerActor {
                     }
                     self.state.tick_rate_ms = ms;
                     let _ = resp_tx.send(true);
+                    should_broadcast = true;
                 }
                 VisualizerMessage::ToggleOrRestartNode(node_id, resp_tx) => {
                     let is_crashed = if let Some(ctrl) = self
@@ -468,6 +488,7 @@ impl VisualizerActor {
                             action: "restarted".to_string(),
                             paused: false,
                         }));
+                        should_broadcast = true;
                     } else if let Some(ctrl) = self
                         .node_controls
                         .get(node_id as usize)
@@ -488,10 +509,15 @@ impl VisualizerActor {
                             action: "toggle".to_string(),
                             paused: !prev,
                         }));
+                        should_broadcast = true;
                     } else {
                         let _ = resp_tx.send(Err(()));
                     }
                 }
+            }
+
+            if should_broadcast {
+                self.broadcast_state();
             }
         }
     }
@@ -505,7 +531,27 @@ fn handle_http_connection(mut stream: TcpStream, actor_tx: mpsc::Sender<Visualiz
     };
     let request = String::from_utf8_lossy(&buffer[..n]);
 
-    if request.starts_with("GET /api/state") {
+    if request.starts_with("GET /api/state/sse") {
+        let (tx, rx) = mpsc::channel();
+        if actor_tx
+            .send(VisualizerMessage::RegisterSseClient(tx))
+            .is_ok()
+        {
+            let headers = "HTTP/1.1 200 OK\r\n\
+                           Content-Type: text/event-stream\r\n\
+                           Cache-Control: no-cache\r\n\
+                           Connection: keep-alive\r\n\
+                           Access-Control-Allow-Origin: *\r\n\r\n";
+            if stream.write_all(headers.as_bytes()).is_ok() {
+                while let Ok(json_data) = rx.recv() {
+                    let event_str = format!("data: {}\n\n", json_data);
+                    if stream.write_all(event_str.as_bytes()).is_err() {
+                        break; // Client disconnected
+                    }
+                }
+            }
+        }
+    } else if request.starts_with("GET /api/state") {
         let (tx, rx) = mpsc::channel();
         if actor_tx.send(VisualizerMessage::GetState(tx)).is_ok() {
             if let Ok(json_data) = rx.recv() {
@@ -717,6 +763,7 @@ fn main() {
         peer_addresses: Arc::clone(&peer_addresses_arc),
         event_tx: event_tx.clone(),
         actor_rx,
+        sse_clients: Vec::new(),
     };
     std::thread::spawn(move || {
         actor.run();
@@ -732,6 +779,7 @@ fn main() {
 
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
+            println!("new connection");
             let actor_tx_clone = actor_tx.clone();
 
             std::thread::spawn(move || {
