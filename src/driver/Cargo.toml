@@ -8,3 +8,8 @@ proto = { path = "../proto" }
 raft = { path = "../raft" }
 prost = "0.14.3"
 tracing = "0.1.44"
+smol = "2"
+async-channel = "2"
+async-lock = "3"
+async-net = "2"
+futures-lite = "2"
