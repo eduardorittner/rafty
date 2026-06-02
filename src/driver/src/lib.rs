@@ -8,11 +8,49 @@ use prost::Message as _;
 use proto::proto::ProtoMessage;
 use raft::{Channel, InitialConfig, Node, Storage, ValidNodeId};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConfigChange {
     Shutdown(bool),
     Pause(bool),
     TickInterval(u64),
+}
+
+/// Broadcasts control changes to all subscribed drivers and their background threads.
+/// This struct is owned by the runner and shared across all drivers in the cluster.
+#[derive(Clone)]
+pub struct ControlBroadcaster {
+    subscribers: Arc<Mutex<Vec<mpsc::Sender<ConfigChange>>>>,
+}
+
+impl ControlBroadcaster {
+    /// Creates a new ControlBroadcaster with no subscribers.
+    pub fn new() -> Self {
+        Self {
+            subscribers: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Subscribes a new driver to the broadcaster.
+    /// Returns a receiver that the driver should use to consume control changes.
+    pub fn subscribe(&self) -> mpsc::Receiver<ConfigChange> {
+        let (tx, rx) = mpsc::channel();
+        let mut subscribers = self.subscribers.lock().unwrap();
+        subscribers.push(tx);
+        rx
+    }
+
+    /// Broadcasts a control change to all subscribers.
+    /// Disconnected subscribers are automatically removed.
+    pub fn broadcast(&self, change: ConfigChange) {
+        let mut subscribers = self.subscribers.lock().unwrap();
+        subscribers.retain(|tx| tx.send(change.clone()).is_ok());
+    }
+}
+
+impl Default for ControlBroadcaster {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Events emitted by the driver for tracking and visualization.
@@ -126,7 +164,6 @@ impl Channel for DriverChannel {
 pub struct RaftDriver<Store: Storage> {
     pub node: Node<Store, DriverChannel>,
     receiver: mpsc::Receiver<ProtoMessage>,
-    pub control_tx: mpsc::Sender<ConfigChange>,
     control_rx: mpsc::Receiver<ConfigChange>,
     shutdown: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
@@ -140,17 +177,19 @@ pub struct RaftDriver<Store: Storage> {
 impl<Store: Storage> RaftDriver<Store> {
     /// Creates and starts a new `RaftDriver`.
     /// Automatically begins listening on `listen_addr` and connecting to all specified `peers`.
+    /// 
+    /// The `control_rx` parameter should be obtained from a `ControlBroadcaster::subscribe()` call.
     pub fn new(
         id: u64,
         peers: Vec<Option<String>>, // peer_id -> IP:port address
         listen_addr: &str,
         storage: Store,
         config: InitialConfig,
+        control_rx: mpsc::Receiver<ConfigChange>,
         event_tx: Option<mpsc::Sender<DriverEvent>>,
     ) -> std::io::Result<Self> {
         let active_connections = Arc::new(Mutex::new(Vec::new()));
         let (sender, receiver) = mpsc::channel();
-        let (control_tx, control_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
         let tick_interval_ms = Arc::new(AtomicU64::new(10)); // Default to 10ms
@@ -367,7 +406,6 @@ impl<Store: Storage> RaftDriver<Store> {
         Ok(Self {
             node,
             receiver,
-            control_tx,
             control_rx,
             shutdown,
             paused,
@@ -382,11 +420,6 @@ impl<Store: Storage> RaftDriver<Store> {
     /// Returns the local address the driver is bound and listening on.
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
-    }
-
-    /// Signals the driver and all background connection threads to shut down.
-    pub fn shutdown(&self) {
-        let _ = self.control_tx.send(ConfigChange::Shutdown(true));
     }
 
     fn get_state_event(&self) -> DriverEvent {
@@ -620,17 +653,55 @@ mod tests {
         let storage = TestStorage { last_index: 0 };
         let peers = Vec::new();
 
-        let driver = RaftDriver::new(1, peers, "127.0.0.1:0", storage, config, None).unwrap();
+        // Create a broadcaster and subscribe for the test driver
+        let broadcaster = ControlBroadcaster::new();
+        let control_rx = broadcaster.subscribe();
+
+        let driver = RaftDriver::new(1, peers, "127.0.0.1:0", storage, config, control_rx, None).unwrap();
         let _addr = driver.local_addr();
 
-        // Run the driver in a background thread and then shut it down
-        let control_tx = driver.control_tx.clone();
+        // Run the driver in a background thread and then shut it down via broadcast
+        let broadcaster_clone = broadcaster.clone();
         let handle = std::thread::spawn(move || {
             driver.run().unwrap();
         });
 
         std::thread::sleep(Duration::from_millis(50));
-        control_tx.send(ConfigChange::Shutdown(true)).unwrap();
+        broadcaster_clone.broadcast(ConfigChange::Shutdown(true));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_broadcast_single_send_multiple_receivers() {
+        let broadcaster = ControlBroadcaster::new();
+        
+        // Subscribe multiple receivers
+        let rx1 = broadcaster.subscribe();
+        let rx2 = broadcaster.subscribe();
+        let rx3 = broadcaster.subscribe();
+
+        // Broadcast a message
+        broadcaster.broadcast(ConfigChange::TickInterval(100));
+
+        // All receivers should get the message
+        assert_eq!(rx1.try_recv(), Ok(ConfigChange::TickInterval(100)));
+        assert_eq!(rx2.try_recv(), Ok(ConfigChange::TickInterval(100)));
+        assert_eq!(rx3.try_recv(), Ok(ConfigChange::TickInterval(100)));
+    }
+
+    #[test]
+    fn test_cluster_shutdown() {
+        let broadcaster = ControlBroadcaster::new();
+        
+        // Subscribe multiple receivers simulating multiple drivers
+        let rx1 = broadcaster.subscribe();
+        let rx2 = broadcaster.subscribe();
+
+        // Broadcast shutdown
+        broadcaster.broadcast(ConfigChange::Shutdown(true));
+
+        // All receivers should get the shutdown
+        assert_eq!(rx1.try_recv(), Ok(ConfigChange::Shutdown(true)));
+        assert_eq!(rx2.try_recv(), Ok(ConfigChange::Shutdown(true)));
     }
 }

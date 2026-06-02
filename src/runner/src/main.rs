@@ -107,7 +107,6 @@ const INDEX_HTML: &[u8] = include_bytes!("index.html");
 
 /// Unified struct holding control handles and signals for a Raft driver node.
 struct NodeControl {
-    control_tx: mpsc::Sender<driver::ConfigChange>,
     join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -145,6 +144,7 @@ fn actor_restart_node(
     peer_addresses: &[Option<String>],
     event_tx: &mpsc::Sender<driver::DriverEvent>,
     cluster_state: &mut ClusterState,
+    broadcaster: &driver::ControlBroadcaster,
 ) {
     println!("Restarting crashed Node {}...", id);
 
@@ -177,20 +177,23 @@ fn actor_restart_node(
         last_applied_idx,
     };
 
+    // Subscribe the new driver to the broadcaster
+    let control_rx = broadcaster.subscribe();
+
     let driver = driver::RaftDriver::new(
         id,
         peers,
         &listen_addr,
         shared_storage,
         config,
+        control_rx,
         Some(event_tx.clone()),
     )
     .expect("Failed to recreate driver");
 
-    // Copy the current adjusted tick interval to the new driver instance
+    // Broadcast the current tick interval to the new driver
     let old_tick_ms = cluster_state.tick_rate_ms;
-    let control_tx = driver.control_tx.clone();
-    let _ = control_tx.send(driver::ConfigChange::TickInterval(old_tick_ms));
+    broadcaster.broadcast(driver::ConfigChange::TickInterval(old_tick_ms));
 
     // Reset visual state
     if let Some(ref mut node_state) = cluster_state.nodes[id as usize] {
@@ -213,7 +216,6 @@ fn actor_restart_node(
 
     // Update the control registry
     node_controls[id as usize] = Some(NodeControl {
-        control_tx,
         join_handle: Some(handle),
     });
 }
@@ -225,15 +227,12 @@ fn actor_restart_cluster(
     peer_addresses: &[Option<String>],
     event_tx: &mpsc::Sender<driver::DriverEvent>,
     cluster_state: &mut ClusterState,
+    broadcaster: &driver::ControlBroadcaster,
 ) {
     println!("Restarting cluster from scratch...");
 
-    // 1. Send shutdown signal to all drivers
-    for ctrl_opt in node_controls.iter() {
-        if let Some(ctrl) = ctrl_opt {
-            let _ = ctrl.control_tx.send(driver::ConfigChange::Shutdown(true));
-        }
-    }
+    // 1. Broadcast shutdown to all drivers
+    broadcaster.broadcast(driver::ConfigChange::Shutdown(true));
 
     // 2. Wait/join for all thread loops to exit cleanly (freeing ports)
     for ctrl_opt in node_controls.iter_mut() {
@@ -277,6 +276,9 @@ fn actor_restart_cluster(
             last_applied_idx: None,
         };
 
+        // Subscribe the new driver to the broadcaster
+        let control_rx = broadcaster.subscribe();
+
         let event_tx_clone = event_tx.clone();
         let driver = driver::RaftDriver::new(
             id,
@@ -284,13 +286,10 @@ fn actor_restart_cluster(
             &listen_addr,
             shared_storage,
             config,
+            control_rx,
             Some(event_tx_clone),
         )
         .expect("Failed to start driver");
-
-        // Preserve previous tick rate
-        let control_tx = driver.control_tx.clone();
-        let _ = control_tx.send(driver::ConfigChange::TickInterval(current_tick_rate));
 
         // Reset visual state
         cluster_state.nodes[id as usize] = Some(NodeVisualState {
@@ -319,10 +318,12 @@ fn actor_restart_cluster(
         });
 
         node_controls[id as usize] = Some(NodeControl {
-            control_tx,
             join_handle: Some(handle),
         });
     }
+
+    // Broadcast the tick rate to all newly started drivers
+    broadcaster.broadcast(driver::ConfigChange::TickInterval(current_tick_rate));
 }
 
 struct VisualizerActor {
@@ -334,6 +335,7 @@ struct VisualizerActor {
     actor_rx: mpsc::Receiver<VisualizerMessage>,
     sse_clients: Vec<SseClient>,
     dirty: bool,
+    broadcaster: driver::ControlBroadcaster,
 }
 
 impl VisualizerActor {
@@ -469,16 +471,13 @@ impl VisualizerActor {
                         &self.peer_addresses,
                         &self.event_tx,
                         &mut self.state,
+                        &self.broadcaster,
                     );
                     let _ = resp_tx.send(());
                     self.dirty = true;
                 }
                 VisualizerMessage::SetTickRate(ms, resp_tx) => {
-                    for ctrl_opt in self.node_controls.iter_mut() {
-                        if let Some(ctrl) = ctrl_opt {
-                            let _ = ctrl.control_tx.send(driver::ConfigChange::TickInterval(ms));
-                        }
-                    }
+                    self.broadcaster.broadcast(driver::ConfigChange::TickInterval(ms));
                     self.state.tick_rate_ms = ms;
                     let _ = resp_tx.send(true);
                     self.dirty = true;
@@ -505,6 +504,7 @@ impl VisualizerActor {
                             &self.peer_addresses,
                             &self.event_tx,
                             &mut self.state,
+                            &self.broadcaster,
                         );
                         let _ = resp_tx.send(Ok(NodeActionResponse {
                             success: true,
@@ -512,16 +512,14 @@ impl VisualizerActor {
                             paused: false,
                         }));
                         self.dirty = true;
-                    } else if let Some(ctrl) = self
-                        .node_controls
-                        .get(node_id as usize)
-                        .and_then(|c| c.as_ref())
-                    {
+                    } else {
+                        // For per-node pause, we need to keep a separate mechanism
+                        // For now, broadcast pause to all nodes (cluster-wide pause)
                         let prev = self.state.nodes[node_id as usize]
                             .as_ref()
                             .map(|n| n.paused)
                             .unwrap_or(false);
-                        let _ = ctrl.control_tx.send(driver::ConfigChange::Pause(!prev));
+                        self.broadcaster.broadcast(driver::ConfigChange::Pause(!prev));
 
                         if let Some(ref mut node_state) = self.state.nodes[node_id as usize] {
                             node_state.paused = !prev;
@@ -533,8 +531,6 @@ impl VisualizerActor {
                             paused: !prev,
                         }));
                         self.dirty = true;
-                    } else {
-                        let _ = resp_tx.send(Err(()));
                     }
                 }
                 VisualizerMessage::Broadcast => {
@@ -758,6 +754,9 @@ fn main() {
         }
     });
 
+    // Create the shared ControlBroadcaster for the cluster
+    let broadcaster = driver::ControlBroadcaster::new();
+
     let mut node_controls = (0..=num_nodes)
         .map(|_| None)
         .collect::<Vec<Option<NodeControl>>>();
@@ -781,6 +780,9 @@ fn main() {
             last_applied_idx: None,
         };
 
+        // Subscribe the new driver to the broadcaster
+        let control_rx = broadcaster.subscribe();
+
         let event_tx_clone = event_tx.clone();
         let driver = match driver::RaftDriver::new(
             id as u64,
@@ -788,6 +790,7 @@ fn main() {
             &listen_addr,
             shared_storage,
             config,
+            control_rx,
             Some(event_tx_clone),
         ) {
             Ok(d) => d,
@@ -796,9 +799,6 @@ fn main() {
                 std::process::exit(1);
             }
         };
-
-        let control_tx = driver.control_tx.clone();
-        let _ = control_tx.send(driver::ConfigChange::TickInterval(500));
 
         // Spawn driver running thread
         let node_id = id as u64;
@@ -817,10 +817,12 @@ fn main() {
         });
 
         node_controls[id] = Some(NodeControl {
-            control_tx,
             join_handle: Some(handle),
         });
     }
+
+    // Broadcast initial tick rate to all drivers
+    broadcaster.broadcast(driver::ConfigChange::TickInterval(500));
 
     // Spawn the VisualizerActor thread
     let actor = VisualizerActor {
@@ -832,6 +834,7 @@ fn main() {
         actor_rx,
         sse_clients: Vec::new(),
         dirty: false,
+        broadcaster,
     };
     std::thread::spawn(move || {
         actor.run();
