@@ -8,6 +8,162 @@ use prost::Message as _;
 use proto::proto::ProtoMessage;
 use raft::{Channel, InitialConfig, Node, Storage, ValidNodeId};
 
+/// Handles reading messages from an incoming TCP stream and forwarding them to the channel.
+fn handle_incoming_stream(
+    mut read_stream: TcpStream,
+    sender: mpsc::Sender<ProtoMessage>,
+    shutdown: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    event_tx: Option<mpsc::Sender<DriverEvent>>,
+) {
+    read_stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap_or(());
+
+    while !shutdown.load(Ordering::Relaxed) {
+        match read_framed_message(&mut read_stream) {
+            Ok(msg) => {
+                // Ignore messages if paused
+                if paused.load(Ordering::Relaxed) {
+                    continue;
+                }
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.send(DriverEvent::MessageReceived(msg.clone()));
+                }
+                if let Err(_) = sender.send(msg) {
+                    break; // Receiver disconnected
+                }
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Incoming stream disconnected or read failed: {}",
+                    e
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// Manages outgoing connection to a peer, handling reconnection and message reading.
+fn manage_peer_connection(
+    peer_id: u64,
+    peer_addr: String,
+    active_connections: Arc<Mutex<Vec<Option<TcpStream>>>>,
+    sender: mpsc::Sender<ProtoMessage>,
+    shutdown: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    event_tx: Option<mpsc::Sender<DriverEvent>>,
+) {
+    while !shutdown.load(Ordering::Relaxed) {
+        tracing::debug!(
+            "Attempting to connect to peer {} at {}",
+            peer_id,
+            peer_addr
+        );
+        match TcpStream::connect(&peer_addr) {
+            Ok(stream) => {
+                if let Err(e) = stream.set_nodelay(true) {
+                    tracing::error!(
+                        "Failed to set TCP nodelay on outgoing connection to {}: {}",
+                        peer_id,
+                        e
+                    );
+                }
+                let write_stream = match stream.try_clone() {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to clone outgoing stream for {}: {}",
+                            peer_id,
+                            e
+                        );
+                        std::thread::sleep(Duration::from_millis(500));
+                        continue;
+                    }
+                };
+
+                // Register the connection
+                {
+                    let mut active = active_connections.lock().unwrap();
+                    let peer_idx = peer_id as usize;
+                    if peer_idx >= active.len() {
+                        active.resize_with(peer_idx + 1, || None);
+                    }
+                    active[peer_idx] = Some(write_stream);
+                }
+
+                let mut read_stream = stream;
+                read_stream
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap_or(());
+
+                while !shutdown.load(Ordering::Relaxed) {
+                    match read_framed_message(&mut read_stream) {
+                        Ok(msg) => {
+                            // Ignore messages if paused
+                            if paused.load(Ordering::Relaxed) {
+                                continue;
+                            }
+                            if let Some(ref tx) = event_tx {
+                                let _ = tx.send(DriverEvent::MessageReceived(
+                                    msg.clone(),
+                                ));
+                            }
+                            if let Err(_) = sender.send(msg) {
+                                break; // Receiver disconnected
+                            }
+                        }
+                        Err(ref e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Outgoing connection to peer {} read failed: {}",
+                                peer_id,
+                                e
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                // Deregister connection upon disconnection
+                {
+                    let mut active = active_connections.lock().unwrap();
+                    let peer_idx = peer_id as usize;
+                    if peer_idx < active.len() {
+                        active[peer_idx] = None;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to connect to peer {}: {}. Retrying...",
+                    peer_id,
+                    e
+                );
+                // Wait and check shutdown flag periodically to allow fast shutdown
+                for _ in 0..10 {
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigChange {
     Shutdown(bool),
@@ -215,51 +371,26 @@ impl<Store: Storage> RaftDriver<Store> {
                                 e
                             );
                         }
-                        let mut read_stream = match stream.try_clone() {
+                        let read_stream = match stream.try_clone() {
                             Ok(s) => s,
                             Err(e) => {
                                 tracing::error!("Failed to clone incoming stream: {}", e);
                                 continue;
                             }
                         };
-                        let s = sender_clone.clone();
-                        let sh = Arc::clone(&shutdown_clone);
-                        let p = Arc::clone(&paused_clone);
-                        let etx = event_tx_clone.clone();
-                        std::thread::spawn(move || {
-                            read_stream
-                                .set_read_timeout(Some(Duration::from_millis(100)))
-                                .unwrap_or(());
-
-                            while !sh.load(Ordering::Relaxed) {
-                                match read_framed_message(&mut read_stream) {
-                                    Ok(msg) => {
-                                        // Ignore messages if paused
-                                        if p.load(Ordering::Relaxed) {
-                                            continue;
-                                        }
-                                        if let Some(ref tx) = etx {
-                                            let _ =
-                                                tx.send(DriverEvent::MessageReceived(msg.clone()));
-                                        }
-                                        if let Err(_) = s.send(msg) {
-                                            break; // Receiver disconnected
-                                        }
-                                    }
-                                    Err(ref e)
-                                        if e.kind() == std::io::ErrorKind::WouldBlock
-                                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                                    {
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            "Incoming stream disconnected or read failed: {}",
-                                            e
-                                        );
-                                        break;
-                                    }
-                                }
+                        std::thread::spawn({
+                            let sender_clone = sender_clone.clone();
+                            let shutdown_clone = Arc::clone(&shutdown_clone);
+                            let paused_clone = Arc::clone(&paused_clone);
+                            let event_tx_clone = event_tx_clone.clone();
+                            move || {
+                                handle_incoming_stream(
+                                    read_stream,
+                                    sender_clone,
+                                    shutdown_clone,
+                                    paused_clone,
+                                    event_tx_clone,
+                                );
                             }
                         });
                     }
@@ -281,112 +412,20 @@ impl<Store: Storage> RaftDriver<Store> {
                 let peer_id = peer_id as u64;
                 let peer_addr = peer_addr.clone();
                 let active_connections_clone = Arc::clone(&active_connections);
-                let s = sender.clone();
-                let sh = Arc::clone(&shutdown);
-                let p = Arc::clone(&paused);
-                let etx = event_tx.clone();
+                let sender_clone = sender.clone();
+                let shutdown_clone = shutdown.clone();
+                let paused_clone = paused.clone();
+                let event_tx_clone = event_tx.clone();
                 let handle = std::thread::spawn(move || {
-                    while !sh.load(Ordering::Relaxed) {
-                        tracing::debug!(
-                            "Attempting to connect to peer {} at {}",
-                            peer_id,
-                            peer_addr
-                        );
-                        match TcpStream::connect(&peer_addr) {
-                            Ok(stream) => {
-                                if let Err(e) = stream.set_nodelay(true) {
-                                    tracing::error!(
-                                        "Failed to set TCP nodelay on outgoing connection to {}: {}",
-                                        peer_id,
-                                        e
-                                    );
-                                }
-                                let write_stream = match stream.try_clone() {
-                                    Ok(ws) => ws,
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Failed to clone outgoing stream for {}: {}",
-                                            peer_id,
-                                            e
-                                        );
-                                        std::thread::sleep(Duration::from_millis(500));
-                                        continue;
-                                    }
-                                };
-
-                                // Register the connection
-                                {
-                                    let mut active = active_connections_clone.lock().unwrap();
-                                    let peer_idx = peer_id as usize;
-                                    if peer_idx >= active.len() {
-                                        active.resize_with(peer_idx + 1, || None);
-                                    }
-                                    active[peer_idx] = Some(write_stream);
-                                }
-
-                                let mut read_stream = stream;
-                                read_stream
-                                    .set_read_timeout(Some(Duration::from_millis(100)))
-                                    .unwrap_or(());
-
-                                while !sh.load(Ordering::Relaxed) {
-                                    match read_framed_message(&mut read_stream) {
-                                        Ok(msg) => {
-                                            // Ignore messages if paused
-                                            if p.load(Ordering::Relaxed) {
-                                                continue;
-                                            }
-                                            if let Some(ref tx) = etx {
-                                                let _ = tx.send(DriverEvent::MessageReceived(
-                                                    msg.clone(),
-                                                ));
-                                            }
-                                            if let Err(_) = s.send(msg) {
-                                                break; // Receiver disconnected
-                                            }
-                                        }
-                                        Err(ref e)
-                                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                                || e.kind() == std::io::ErrorKind::TimedOut =>
-                                        {
-                                            continue;
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "Outgoing connection to peer {} read failed: {}",
-                                                peer_id,
-                                                e
-                                            );
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // Deregister connection upon disconnection
-                                {
-                                    let mut active = active_connections_clone.lock().unwrap();
-                                    let peer_idx = peer_id as usize;
-                                    if peer_idx < active.len() {
-                                        active[peer_idx] = None;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::debug!(
-                                    "Failed to connect to peer {}: {}. Retrying...",
-                                    peer_id,
-                                    e
-                                );
-                                // Wait and check shutdown flag periodically to allow fast shutdown
-                                for _ in 0..10 {
-                                    if sh.load(Ordering::Relaxed) {
-                                        break;
-                                    }
-                                    std::thread::sleep(Duration::from_millis(50));
-                                }
-                            }
-                        }
-                    }
+                    manage_peer_connection(
+                        peer_id,
+                        peer_addr,
+                        active_connections_clone,
+                        sender_clone,
+                        shutdown_clone,
+                        paused_clone,
+                        event_tx_clone,
+                    );
                 });
                 peer_threads.push(handle);
             }
