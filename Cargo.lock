@@ -505,14 +505,9 @@ dependencies = [
 name = "driver"
 version = "0.1.0"
 dependencies = [
- "async-channel 2.5.0",
- "async-lock 3.4.2",
- "async-net",
- "futures-lite 2.6.1",
  "prost",
  "proto",
  "raft",
- "smol",
  "tracing",
 ]
 

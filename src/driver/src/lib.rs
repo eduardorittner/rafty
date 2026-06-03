@@ -1,71 +1,25 @@
-use std::io::{Read, Write};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    io::{Read, Write},
+    net::TcpStream,
+    sync::mpsc::{Receiver, Sender},
+};
 
-use async_channel::{Receiver, Sender, unbounded};
-use async_lock::Mutex;
-use async_net::{TcpListener, TcpStream};
-use futures_lite::future;
-use futures_lite::io::{AsyncReadExt, AsyncWriteExt};
-use prost::Message as _;
+use prost::Message;
 use proto::proto::ProtoMessage;
-use raft::{Channel, InitialConfig, Node, Storage, ValidNodeId};
+use raft::{Channel, Node, Storage};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigChange {
     Shutdown(bool),
-    Pause { target_id: Option<u64>, paused: bool },
+    Pause {
+        target_id: Option<u64>,
+        paused: bool,
+    },
     TickInterval(u64),
 }
 
-/// Broadcasts control changes to all subscribed drivers and their background tasks.
-/// This struct is owned by the runner and shared across all drivers in the cluster.
-#[derive(Clone)]
-pub struct ControlBroadcaster {
-    subscribers: Arc<Mutex<Vec<Sender<ConfigChange>>>>,
-}
-
-impl ControlBroadcaster {
-    /// Creates a new ControlBroadcaster with no subscribers.
-    pub fn new() -> Self {
-        Self {
-            subscribers: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    /// Subscribes a new driver to the broadcaster.
-    /// Returns a receiver that the driver should use to consume control changes.
-    pub async fn subscribe(&self) -> Receiver<ConfigChange> {
-        let (tx, rx) = unbounded();
-        let mut subscribers = self.subscribers.lock().await;
-        subscribers.push(tx);
-        rx
-    }
-
-    /// Broadcasts a control change to all subscribers.
-    /// Disconnected subscribers are automatically removed.
-    pub async fn broadcast(&self, change: ConfigChange) {
-        let mut subscribers = self.subscribers.lock().await;
-        let mut to_remove = Vec::new();
-        for (i, tx) in subscribers.iter().enumerate() {
-            if tx.send(change.clone()).await.is_err() {
-                to_remove.push(i);
-            }
-        }
-        for i in to_remove.into_iter().rev() {
-            subscribers.remove(i);
-        }
-    }
-}
-
-impl Default for ControlBroadcaster {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Events emitted by the driver for tracking and visualization.
+/// Events emitted by the driver for tracking the node's internal state and visualization.
 #[derive(Debug, Clone)]
 pub enum DriverEvent {
     MessageSent(ProtoMessage),
@@ -91,15 +45,109 @@ pub enum DriverEvent {
     },
 }
 
-/// Reads a length-prefixed `ProtoMessage` from a reader using async I/O.
+pub struct RaftDriver<S: Storage> {
+    pub node: Node<S, DriverChannel>,
+    /// Incoming `ProtoMessages` from other nodes
+    tcp_rx: Receiver<ProtoMessage>,
+}
+
+/// Custom channel for the Raft node driven by TCP sockets.
+///
+/// Sends outgoing messages to an internal queue which will be processed by a separate sender async
+/// task. This is necessary so we can have async writes without forcing the `Channel` trait to be
+/// async.
+#[derive(Clone)]
+pub struct DriverChannel {
+    writer_tx: Sender<ProtoMessage>,
+}
+
+/// Sends messages accross TCP to other nodes
+pub struct TcpSender {
+    /// Channel where node's outgoing messages are stored
+    channel_recv: Receiver<ProtoMessage>,
+    /// Outgoing TCP streams
+    connections: HashMap<u64, TcpStream>,
+    /// Outgoing state events to the underlying application
+    state_tx: Sender<DriverEvent>,
+}
+
+/// Listens to TCP messages from other nodes
+pub struct TcpListener {
+    /// Incoming TCP streams
+    connections: HashMap<u64, TcpStream>,
+    /// Sends incoming messages to `RaftDriver` for handling
+    driver_tx: Sender<ProtoMessage>,
+    // TODO: add a `Receiver<ConfigChange>` channel to wait on events
+}
+
+impl Channel for DriverChannel {
+    fn send(&mut self, msg: ProtoMessage) {
+        assert!(msg.to != 0);
+        self.writer_tx.send(msg).unwrap();
+    }
+
+    fn broadcast(&mut self, msg: ProtoMessage) {
+        assert!(msg.to == 0);
+        self.writer_tx.send(msg).unwrap();
+    }
+}
+
+impl TcpSender {
+    fn run(&mut self) {
+        loop {
+            let msg = self.channel_recv.recv().unwrap();
+
+            if msg.to == 0 {
+                self.broadcast(&msg);
+            } else {
+                self.send(&msg);
+            }
+
+            self.state_tx.send(DriverEvent::MessageSent(msg)).unwrap();
+        }
+    }
+
+    fn broadcast(&mut self, msg: &ProtoMessage) {
+        for (_, conn) in &mut self.connections {
+            write_framed_message(conn, msg).unwrap();
+        }
+    }
+
+    fn send(&mut self, msg: &ProtoMessage) {
+        let conn = self.connections.get_mut(&msg.to).unwrap();
+        write_framed_message(conn, msg).unwrap();
+    }
+}
+
+impl TcpListener {
+    fn run(&mut self) {
+        let mut buf = [0u8; 1];
+        loop {
+            for (_, conn) in &mut self.connections {
+                match conn.peek(&mut buf) {
+                    Ok(0) => {
+                        panic!("tcp connection closed unexpectedly")
+                    }
+                    Ok(_) => {
+                        let msg = read_framed_message(conn).unwrap();
+                        self.driver_tx.send(msg).unwrap();
+                    }
+                    Err(_) => (),
+                }
+            }
+        }
+    }
+}
+
+/// Reads a length-prefixed `ProtoMessage` from a reader.
 /// Framing format: [ 4-byte length prefix (big-endian u32) | Protobuf Payload ]
-async fn read_framed_message_async<R: AsyncReadExt + Unpin>(reader: &mut R) -> std::io::Result<ProtoMessage> {
+fn read_framed_message<R: Read>(reader: &mut R) -> std::io::Result<ProtoMessage> {
     let mut len_bytes = [0u8; 4];
-    reader.read_exact(&mut len_bytes).await?;
+    reader.read_exact(&mut len_bytes).unwrap();
     let len = u32::from_be_bytes(len_bytes) as usize;
 
     let mut payload = vec![0u8; len];
-    reader.read_exact(&mut payload).await?;
+    reader.read_exact(&mut payload).unwrap();
 
     ProtoMessage::decode(&payload[..])
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -107,679 +155,15 @@ async fn read_framed_message_async<R: AsyncReadExt + Unpin>(reader: &mut R) -> s
 
 /// Writes a length-prefixed `ProtoMessage` to a writer using async I/O.
 /// Framing format: [ 4-byte length prefix (big-endian u32) | Protobuf Payload ]
-async fn write_framed_message_async<W: AsyncWriteExt + Unpin>(writer: &mut W, msg: &ProtoMessage) -> std::io::Result<()> {
+fn write_framed_message<W: Write>(writer: &mut W, msg: &ProtoMessage) -> std::io::Result<()> {
     let len = msg.encoded_len();
     let len_u32 = len as u32;
-    writer.write_all(&len_u32.to_be_bytes()).await?;
+    writer.write_all(&len_u32.to_be_bytes());
 
     let mut buf = Vec::with_capacity(len);
     msg.encode(&mut buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    writer.write_all(&buf).await?;
-    writer.flush().await?;
+    writer.write_all(&buf);
+    writer.flush();
     Ok(())
-}
-
-/// Reads a length-prefixed `ProtoMessage` from a reader (sync version for tests).
-/// Framing format: [ 4-byte length prefix (big-endian u32) | Protobuf Payload ]
-pub fn read_framed_message<R: Read>(reader: &mut R) -> std::io::Result<ProtoMessage> {
-    let mut len_bytes = [0u8; 4];
-    reader.read_exact(&mut len_bytes)?;
-    let len = u32::from_be_bytes(len_bytes) as usize;
-
-    let mut payload = vec![0u8; len];
-    reader.read_exact(&mut payload)?;
-
-    ProtoMessage::decode(&payload[..])
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-}
-
-/// Writes a length-prefixed `ProtoMessage` to a writer (sync version for tests).
-/// Framing format: [ 4-byte length prefix (big-endian u32) | Protobuf Payload ]
-pub fn write_framed_message<W: Write>(writer: &mut W, msg: &ProtoMessage) -> std::io::Result<()> {
-    let len = msg.encoded_len();
-    let len_u32 = len as u32;
-    writer.write_all(&len_u32.to_be_bytes())?;
-
-    let mut buf = Vec::with_capacity(len);
-    msg.encode(&mut buf)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    writer.write_all(&buf)?;
-    writer.flush()?;
-    Ok(())
-}
-
-/// Custom channel for the Raft node driven by TCP sockets.
-/// Dispatches outgoing messages directly to the registered active connections.
-#[derive(Clone)]
-pub struct DriverChannel {
-    id: u64,
-    peer_addresses: Arc<Vec<Option<String>>>,
-    active_connections: Arc<Mutex<Vec<Option<Arc<Mutex<TcpStream>>>>>>,
-    event_tx: Option<Sender<DriverEvent>>,
-    broadcaster: ControlBroadcaster,
-    incoming_tx: Sender<ProtoMessage>,
-}
-
-impl Channel for DriverChannel {
-    fn send(&mut self, msg: ProtoMessage) {
-        let to = msg.to;
-        let active = self.active_connections.clone();
-        let event_tx = self.event_tx.clone();
-        let peer_addresses = self.peer_addresses.clone();
-        let broadcaster = self.broadcaster.clone();
-        let incoming_tx = self.incoming_tx.clone();
-        let node_id = self.id;
-        
-        smol::spawn(async move {
-            if let Some(ref tx) = event_tx {
-                let _ = tx.send(DriverEvent::MessageSent(msg.clone())).await;
-            }
-            let to_idx = to as usize;
-
-            let stream_arc = {
-                let mut connections = active.lock().await;
-                if to_idx >= connections.len() {
-                    connections.resize_with(to_idx + 1, || None);
-                }
-                if connections[to_idx].is_none() {
-                    let peer_addr_opt = peer_addresses.get(to_idx).and_then(|opt| opt.as_ref());
-                    if let Some(peer_addr) = peer_addr_opt {
-                        tracing::debug!("Connecting on-demand to peer {} at {}", to, peer_addr);
-                        match TcpStream::connect(peer_addr).await {
-                            Ok(stream) => {
-                                let _ = stream.set_nodelay(true);
-                                let stream_arc = Arc::new(Mutex::new(stream.clone()));
-                                connections[to_idx] = Some(stream_arc.clone());
-
-                                // Spawn incoming reader task for this stream
-                                let handler_control_rx = broadcaster.subscribe().await;
-                                let incoming_tx = incoming_tx.clone();
-                                let event_tx = event_tx.clone();
-                                smol::spawn(async move {
-                                    handle_incoming_stream(
-                                        node_id,
-                                        stream,
-                                        incoming_tx,
-                                        handler_control_rx,
-                                        event_tx,
-                                    ).await;
-                                }).detach();
-
-                                Some(stream_arc)
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to connect to peer {} at {}: {}", to, peer_addr, e);
-                                None
-                            }
-                        }
-                    } else {
-                        tracing::warn!("No peer address configured for node {}", to);
-                        None
-                    }
-                } else {
-                    connections[to_idx].clone()
-                }
-            };
-
-            if let Some(stream_arc) = stream_arc {
-                let mut stream_guard = stream_arc.lock().await;
-                if let Err(e) = write_framed_message_async(&mut *stream_guard, &msg).await {
-                    tracing::error!("Failed to send message to peer {}: {}", to, e);
-                    let mut active_conns = active.lock().await;
-                    if to_idx < active_conns.len() {
-                        active_conns[to_idx] = None;
-                    }
-                }
-            }
-        }).detach();
-    }
-
-    fn broadcast(&mut self, msg: ProtoMessage) {
-        let active = self.active_connections.clone();
-        let event_tx = self.event_tx.clone();
-        let peer_addresses = self.peer_addresses.clone();
-        let broadcaster = self.broadcaster.clone();
-        let incoming_tx = self.incoming_tx.clone();
-        let node_id = self.id;
-        
-        smol::spawn(async move {
-            let num_peers = peer_addresses.len();
-            let mut failed_peers = Vec::new();
-            
-            for peer_id in 0..num_peers {
-                if peer_addresses.get(peer_id).and_then(|opt| opt.as_ref()).is_none() {
-                    continue;
-                }
-                
-                let stream_arc = {
-                    let mut connections = active.lock().await;
-                    if peer_id >= connections.len() {
-                        connections.resize_with(peer_id + 1, || None);
-                    }
-                    if connections[peer_id].is_none() {
-                        let peer_addr = peer_addresses[peer_id].as_ref().unwrap();
-                        tracing::debug!("Broadcasting: Connecting on-demand to peer {} at {}", peer_id, peer_addr);
-                        match TcpStream::connect(peer_addr).await {
-                            Ok(stream) => {
-                                let _ = stream.set_nodelay(true);
-                                let stream_arc = Arc::new(Mutex::new(stream.clone()));
-                                connections[peer_id] = Some(stream_arc.clone());
-
-                                // Spawn incoming reader task for this stream
-                                let handler_control_rx = broadcaster.subscribe().await;
-                                let incoming_tx = incoming_tx.clone();
-                                let event_tx = event_tx.clone();
-                                smol::spawn(async move {
-                                    handle_incoming_stream(
-                                        node_id,
-                                        stream,
-                                        incoming_tx,
-                                        handler_control_rx,
-                                        event_tx,
-                                    ).await;
-                                }).detach();
-
-                                Some(stream_arc)
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to connect to peer {} during broadcast: {}", peer_id, e);
-                                None
-                            }
-                        }
-                    } else {
-                        connections[peer_id].clone()
-                    }
-                };
-
-                if let Some(stream_arc) = stream_arc {
-                    let mut stream_guard = stream_arc.lock().await;
-                    let mut msg_copy = msg.clone();
-                    msg_copy.to = peer_id as u64;
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.send(DriverEvent::MessageSent(msg_copy.clone())).await;
-                    }
-                    if let Err(e) = write_framed_message_async(&mut *stream_guard, &msg_copy).await {
-                        tracing::error!("Failed to broadcast message to peer {}: {}", peer_id, e);
-                        failed_peers.push(peer_id);
-                    }
-                }
-            }
-
-            if !failed_peers.is_empty() {
-                let mut active_conns = active.lock().await;
-                for peer_id in failed_peers {
-                    if peer_id < active_conns.len() {
-                        active_conns[peer_id] = None;
-                    }
-                }
-            }
-        }).detach();
-    }
-}
-
-/// Reads messages from an incoming TCP stream and forwards them to the channel.
-/// Listens for shutdown/pause from its own control_rx subscription.
-async fn handle_incoming_stream(
-    node_id: u64,
-    mut read_stream: TcpStream,
-    sender: Sender<ProtoMessage>,
-    control_rx: Receiver<ConfigChange>,
-    event_tx: Option<Sender<DriverEvent>>,
-) {
-    let mut shutdown = false;
-    let mut paused = false;
-
-    while !shutdown {
-        // Process control changes first
-        while let Ok(change) = control_rx.try_recv() {
-            match change {
-                ConfigChange::Shutdown(val) => shutdown = val,
-                ConfigChange::Pause { target_id, paused: val } => {
-                    if target_id.is_none() || target_id == Some(node_id) {
-                        paused = val;
-                    }
-                }
-                ConfigChange::TickInterval(_) => {}
-            }
-        }
-
-        if shutdown {
-            break;
-        }
-
-        if paused {
-            smol::Timer::after(Duration::from_millis(50)).await;
-            continue;
-        }
-
-        match read_framed_message_async(&mut read_stream).await {
-            Ok(msg) => {
-                if let Some(ref tx) = event_tx {
-                    let _ = tx.send(DriverEvent::MessageReceived(msg.clone())).await;
-                }
-                if sender.send(msg).await.is_err() {
-                    break; // Receiver disconnected
-                }
-            }
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut
-                    || e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                smol::Timer::after(Duration::from_millis(10)).await;
-                continue;
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Incoming stream disconnected or read failed: {}",
-                    e
-                );
-                break;
-            }
-        }
-    }
-}
-
-/// A driver for a Raft node that handles TCP networking, connection management,
-/// and periodic ticking using async tasks.
-pub struct RaftDriver<Store: Storage> {
-    pub node: Node<Store, DriverChannel>,
-    receiver: Receiver<ProtoMessage>,
-    control_rx: Receiver<ConfigChange>,
-    listener_task: Option<smol::Task<()>>,
-    local_addr: SocketAddr,
-    event_tx: Option<Sender<DriverEvent>>,
-}
-
-impl<Store: Storage> RaftDriver<Store> {
-    /// Creates and starts a new `RaftDriver`.
-    /// Automatically begins listening on `listen_addr` and connecting to all specified `peers`.
-    /// 
-    /// The `control_rx` parameter should be obtained from a `ControlBroadcaster::subscribe()` call.
-    /// Background tasks also subscribe to the broadcaster for shutdown/pause control.
-    pub async fn new(
-        id: u64,
-        peers: Vec<Option<String>>, // peer_id -> IP:port address
-        listen_addr: &str,
-        storage: Store,
-        config: InitialConfig,
-        control_rx: Receiver<ConfigChange>,
-        broadcaster: ControlBroadcaster,
-        event_tx: Option<Sender<DriverEvent>>,
-    ) -> std::io::Result<Self> {
-        let active_connections = Arc::new(Mutex::new(Vec::new()));
-        let (sender, receiver) = unbounded();
-
-        // Bind the TCP listener for incoming connections from peer nodes.
-        let listener = TcpListener::bind(listen_addr).await?;
-        let local_addr = listener.local_addr()?;
-
-        // Spawn listener task for incoming connections
-        let sender_clone = sender.clone();
-        let event_tx_clone = event_tx.clone();
-        let broadcaster_clone = broadcaster.clone();
-        let listener_task = smol::spawn(async move {
-            // Subscribe listener task to broadcaster
-            let listener_control_rx = broadcaster_clone.subscribe().await;
-
-            loop {
-                // Check for shutdown in listener loop
-                let shutdown = listener_control_rx.try_recv().map_or(false, |c| matches!(c, ConfigChange::Shutdown(true)));
-                if shutdown {
-                    break;
-                }
-                
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        if let Err(e) = stream.set_nodelay(true) {
-                            tracing::error!(
-                                "Failed to set TCP nodelay on incoming connection: {}",
-                                e
-                            );
-                        }
-                        // Each incoming stream handler gets its own control_rx subscription
-                        let handler_control_rx = broadcaster_clone.subscribe().await;
-                        let sender_clone = sender_clone.clone();
-                        let event_tx_clone = event_tx_clone.clone();
-                        smol::spawn(async move {
-                            handle_incoming_stream(
-                                id,
-                                stream,
-                                sender_clone,
-                                handler_control_rx,
-                                event_tx_clone,
-                            ).await;
-                        }).detach();
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        smol::Timer::after(Duration::from_millis(10)).await;
-                    }
-                    Err(e) => {
-                        tracing::error!("Listener failed to accept stream: {}", e);
-                        smol::Timer::after(Duration::from_millis(50)).await;
-                    }
-                }
-            }
-        });
-
-        let valid_id = ValidNodeId(std::num::NonZeroU64::new(id).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Node ID must be non-zero")
-        })?);
-
-        let channel = DriverChannel {
-            id,
-            peer_addresses: Arc::new(peers),
-            active_connections: Arc::clone(&active_connections),
-            event_tx: event_tx.clone(),
-            broadcaster: broadcaster.clone(),
-            incoming_tx: sender,
-        };
-
-        let node = Node::new(valid_id, storage, channel, config);
-
-        Ok(Self {
-            node,
-            receiver,
-            control_rx,
-            listener_task: Some(listener_task),
-            local_addr,
-            event_tx,
-        })
-    }
-
-    /// Returns the local address the driver is bound and listening on.
-    pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
-    }
-
-    fn get_state_event(&self) -> DriverEvent {
-        DriverEvent::StateChanged {
-            id: u64::from(self.node.id),
-            term: self.node.term,
-            voted_for: u64::from(self.node.voted_for),
-            leader_id: u64::from(self.node.leader_id),
-            role: match &self.node.role {
-                raft::Role::Follower(_) => "Follower".to_string(),
-                raft::Role::Candidate(_) => "Candidate".to_string(),
-                raft::Role::Leader(_) => "Leader".to_string(),
-            },
-        }
-    }
-
-    /// Starts the main event loop.
-    /// Blocks the current task, ticking the state machine every `tick_interval_ms`
-    /// and immediately passing any received network messages to `node.step()`.
-    pub async fn run(mut self) -> raft::Result<()> {
-        // Local state variables (no Arc needed!)
-        let mut shutdown = false;
-        let mut paused = false;
-        let mut tick_interval_ms = 10u64;
-
-        let mut last_tick_ms = tick_interval_ms;
-        let mut tick_interval = Duration::from_millis(last_tick_ms);
-        let mut next_tick = Instant::now() + tick_interval;
-
-        let mut last_term = self.node.term;
-        let mut last_role = match &self.node.role {
-            raft::Role::Follower(_) => 0,
-            raft::Role::Candidate(_) => 1,
-            raft::Role::Leader(_) => 2,
-        };
-        let mut last_voted_for = u64::from(self.node.voted_for);
-        let mut last_leader_id = u64::from(self.node.leader_id);
-
-        // Send initial state event
-        if let Some(ref tx) = self.event_tx {
-            let _ = tx.send(self.get_state_event()).await;
-        }
-
-        while !shutdown {
-            // Process control changes from subscribed control_rx
-            while let Ok(change) = self.control_rx.try_recv() {
-                match change {
-                    ConfigChange::Shutdown(val) => {
-                        shutdown = val;
-                        if let Some(ref tx) = self.event_tx {
-                            let _ = tx.send(DriverEvent::Shutdown {
-                                id: u64::from(self.node.id),
-                                shutdown: val,
-                            }).await;
-                        }
-                    }
-                    ConfigChange::Pause { target_id, paused: val } => {
-                        if target_id.is_none() || target_id == Some(u64::from(self.node.id)) {
-                            paused = val;
-                            if let Some(ref tx) = self.event_tx {
-                                let _ = tx.send(DriverEvent::Paused {
-                                    id: u64::from(self.node.id),
-                                    paused: val,
-                                }).await;
-                            }
-                        }
-                    }
-                    ConfigChange::TickInterval(val) => {
-                        tick_interval_ms = val;
-                        if let Some(ref tx) = self.event_tx {
-                            let _ = tx.send(DriverEvent::TickInterval {
-                                id: u64::from(self.node.id),
-                                interval_ms: val,
-                            }).await;
-                        }
-                    }
-                }
-            }
-
-            if shutdown {
-                break;
-            }
-
-            // Simulated crash/partition behavior
-            if paused {
-                // Drain any incoming messages in the channel to simulate packet loss while offline
-                while let Ok(_) = self.receiver.try_recv() {}
-                smol::Timer::after(Duration::from_millis(50)).await;
-                continue;
-            }
-
-            // Check if tick rate has changed dynamically
-            if tick_interval_ms != last_tick_ms {
-                last_tick_ms = tick_interval_ms;
-                tick_interval = Duration::from_millis(tick_interval_ms);
-                // Reset next tick deadline relative to now
-                next_tick = Instant::now() + tick_interval;
-            }
-
-            let now = Instant::now();
-            let timeout = if next_tick > now {
-                next_tick - now
-            } else {
-                Duration::from_millis(0)
-            };
-
-            // Use timeout-based receive with async channel
-            let msg = future::or(
-                async {
-                    smol::Timer::after(timeout).await;
-                    None
-                },
-                async {
-                    self.receiver.recv().await.ok()
-                }
-            ).await;
-
-            if let Some(msg) = msg {
-                if let Err(e) = self.node.step(proto::proto::Message::from(msg)) {
-                    tracing::error!("Error stepping message in raft node: {}", e);
-                }
-
-                // Process any other messages currently in the channel immediately
-                while let Ok(msg) = self.receiver.try_recv() {
-                    if let Err(e) = self.node.step(proto::proto::Message::from(msg)) {
-                        tracing::error!("Error stepping message in raft node: {}", e);
-                    }
-                }
-            }
-
-            let now = Instant::now();
-            if now >= next_tick {
-                self.node.tick();
-                next_tick += tick_interval;
-                if next_tick < now {
-                    next_tick = now + tick_interval;
-                }
-            }
-
-            // Check if state changed, and emit StateChanged event if so
-            let current_role = match &self.node.role {
-                raft::Role::Follower(_) => 0,
-                raft::Role::Candidate(_) => 1,
-                raft::Role::Leader(_) => 2,
-            };
-            let current_voted_for = u64::from(self.node.voted_for);
-            let current_leader_id = u64::from(self.node.leader_id);
-
-            if self.node.term != last_term
-                || current_role != last_role
-                || current_voted_for != last_voted_for
-                || current_leader_id != last_leader_id
-            {
-                last_term = self.node.term;
-                last_role = current_role;
-                last_voted_for = current_voted_for;
-                last_leader_id = current_leader_id;
-
-                if let Some(ref tx) = self.event_tx {
-                    let _ = tx.send(self.get_state_event()).await;
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl<Store: Storage> Drop for RaftDriver<Store> {
-    fn drop(&mut self) {
-        // Tasks are automatically cancelled when dropped
-        // Just take them to ensure they're cleaned up
-        let _ = self.listener_task.take();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::num::NonZeroU64;
-
-    struct TestStorage {
-        last_index: u64,
-    }
-
-    impl Storage for TestStorage {
-        fn last_index(&self) -> u64 {
-            self.last_index
-        }
-        fn term(&self, _idx: u64) -> raft::Result<u64> {
-            Ok(0)
-        }
-        fn entries(&self, _low: u64, _high: u64) -> raft::Result<Vec<proto::proto::Entry>> {
-            Ok(vec![])
-        }
-        fn append(&mut self, _entries: Vec<proto::proto::Entry>) -> raft::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn test_framing_roundtrip() {
-        let msg = ProtoMessage {
-            to: 2,
-            from: 1,
-            term: 42,
-            ..Default::default()
-        };
-
-        let mut buf = Vec::new();
-        write_framed_message(&mut buf, &msg).unwrap();
-
-        let mut cursor = std::io::Cursor::new(buf);
-        let decoded = read_framed_message(&mut cursor).unwrap();
-
-        assert_eq!(decoded.to, 2);
-        assert_eq!(decoded.from, 1);
-        assert_eq!(decoded.term, 42);
-    }
-
-    #[test]
-    fn test_driver_startup_and_tick() {
-        let config = InitialConfig {
-            id: ValidNodeId(NonZeroU64::new(1).unwrap()),
-            cluster_size: 3,
-            min_ticks_before_election: NonZeroU64::new(10).unwrap(),
-            max_ticks_before_election: NonZeroU64::new(20).unwrap(),
-            ticks_between_heartbeats: NonZeroU64::new(1).unwrap(),
-            last_applied_idx: None,
-        };
-
-        let storage = TestStorage { last_index: 0 };
-        let peers = Vec::new();
-
-        // Create a broadcaster and subscribe for the test driver
-        let broadcaster = ControlBroadcaster::new();
-        
-        smol::block_on(async {
-            let control_rx = broadcaster.subscribe().await;
-
-            let driver = RaftDriver::new(1, peers, "127.0.0.1:0", storage, config, control_rx, broadcaster.clone(), None).await.unwrap();
-            let _addr = driver.local_addr();
-
-            // Run the driver in a background task and then shut it down via broadcast
-            let handle = smol::spawn(async move {
-                driver.run().await.unwrap();
-            });
-
-            smol::Timer::after(Duration::from_millis(50)).await;
-            broadcaster.broadcast(ConfigChange::Shutdown(true)).await;
-            handle.await;
-        });
-    }
-
-    #[test]
-    fn test_broadcast_single_send_multiple_receivers() {
-        let broadcaster = ControlBroadcaster::new();
-        
-        smol::block_on(async {
-            // Subscribe multiple receivers
-            let rx1 = broadcaster.subscribe().await;
-            let rx2 = broadcaster.subscribe().await;
-            let rx3 = broadcaster.subscribe().await;
-
-            // Broadcast a message
-            broadcaster.broadcast(ConfigChange::TickInterval(100)).await;
-
-            // All receivers should get the message
-            assert_eq!(rx1.try_recv(), Ok(ConfigChange::TickInterval(100)));
-            assert_eq!(rx2.try_recv(), Ok(ConfigChange::TickInterval(100)));
-            assert_eq!(rx3.try_recv(), Ok(ConfigChange::TickInterval(100)));
-        });
-    }
-
-    #[test]
-    fn test_cluster_shutdown() {
-        let broadcaster = ControlBroadcaster::new();
-        
-        smol::block_on(async {
-            // Subscribe multiple receivers simulating multiple drivers
-            let rx1 = broadcaster.subscribe().await;
-            let rx2 = broadcaster.subscribe().await;
-
-            // Broadcast shutdown
-            broadcaster.broadcast(ConfigChange::Shutdown(true)).await;
-
-            // All receivers should get the shutdown
-            assert_eq!(rx1.try_recv(), Ok(ConfigChange::Shutdown(true)));
-            assert_eq!(rx2.try_recv(), Ok(ConfigChange::Shutdown(true)));
-        });
-    }
 }
