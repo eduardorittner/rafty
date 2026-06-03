@@ -108,9 +108,32 @@ struct ClusterState {
 
 const INDEX_HTML: &[u8] = include_bytes!("index.html");
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+struct CatchUnwindFuture<F> {
+    inner: F,
+}
+
+impl<F: Future> Future for CatchUnwindFuture<F> {
+    type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let pin = unsafe { self.map_unchecked_mut(|s| &mut s.inner) };
+        match catch_unwind(AssertUnwindSafe(|| pin.poll(cx))) {
+            Ok(Poll::Ready(val)) => Poll::Ready(Ok(val)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+}
+
 /// Unified struct holding control handles and signals for a Raft driver node.
 struct NodeControl {
-    join_handle: Option<std::thread::JoinHandle<()>>,
+    task: Option<smol::Task<()>>,
+    crashed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Response sent by the actor when a node is toggled or restarted.
@@ -140,7 +163,7 @@ enum VisualizerMessage {
 }
 
 /// Helper function to reconstruct a panicked/crashed driver thread.
-fn actor_restart_node(
+async fn actor_restart_node(
     id: u64,
     storages: &[Option<Arc<std::sync::Mutex<MemStorage>>>],
     node_controls: &mut [Option<NodeControl>],
@@ -181,9 +204,9 @@ fn actor_restart_node(
     };
 
     // Subscribe the new driver to the broadcaster
-    let control_rx = smol::block_on(broadcaster.subscribe());
+    let control_rx = broadcaster.subscribe().await;
 
-    let driver = smol::block_on(driver::RaftDriver::new(
+    let driver = driver::RaftDriver::new(
         id,
         peers,
         &listen_addr,
@@ -192,12 +215,13 @@ fn actor_restart_node(
         control_rx,
         broadcaster.clone(),
         Some(event_tx.clone()),
-    ))
+    )
+    .await
     .expect("Failed to recreate driver");
 
     // Broadcast the current tick interval to the new driver
     let old_tick_ms = cluster_state.tick_rate_ms;
-    smol::block_on(broadcaster.broadcast(driver::ConfigChange::TickInterval(old_tick_ms)));
+    broadcaster.broadcast(driver::ConfigChange::TickInterval(old_tick_ms)).await;
 
     // Reset visual state
     if let Some(ref mut node_state) = cluster_state.nodes[id as usize] {
@@ -205,29 +229,34 @@ fn actor_restart_node(
         node_state.role = "Follower".to_string(); // Starts back as Follower
     }
 
-    // Spawn running thread
+    // Spawn running task
     let node_id = id;
-    let handle = std::thread::spawn(move || {
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            smol::block_on(async {
-                if let Err(e) = driver.run().await {
-                    eprintln!("Restarted Node {} driver failed: {}", node_id, e);
-                }
-            });
-        }));
-        if let Err(_) = res {
-            eprintln!("Restarted Node {} driver thread panicked", node_id);
+    let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let crashed_clone = crashed.clone();
+    let task = smol::spawn(async move {
+        let runner_fut = CatchUnwindFuture { inner: driver.run() };
+        match runner_fut.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!("Restarted Node {} driver failed: {}", node_id, e);
+                crashed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Err(panic_err) => {
+                eprintln!("Restarted Node {} driver panicked: {:?}", node_id, panic_err);
+                crashed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
         }
     });
 
     // Update the control registry
     node_controls[id as usize] = Some(NodeControl {
-        join_handle: Some(handle),
+        task: Some(task),
+        crashed,
     });
 }
 
 /// Dynamic reset function to wipe all cluster nodes and restart from term 0
-fn actor_restart_cluster(
+async fn actor_restart_cluster(
     storages: &[Option<Arc<std::sync::Mutex<MemStorage>>>],
     node_controls: &mut [Option<NodeControl>],
     peer_addresses: &[Option<String>],
@@ -238,13 +267,13 @@ fn actor_restart_cluster(
     println!("Restarting cluster from scratch...");
 
     // 1. Broadcast shutdown to all drivers
-    smol::block_on(broadcaster.broadcast(driver::ConfigChange::Shutdown(true)));
+    broadcaster.broadcast(driver::ConfigChange::Shutdown(true)).await;
 
-    // 2. Wait/join for all thread loops to exit cleanly (freeing ports)
+    // 2. Wait/cancel all active tasks cleanly
     for ctrl_opt in node_controls.iter_mut() {
         if let Some(mut ctrl) = ctrl_opt.take() {
-            if let Some(handle) = ctrl.join_handle.take() {
-                let _ = handle.join();
+            if let Some(task) = ctrl.task.take() {
+                task.await; // wait for it to complete exit due to shutdown broadcast
             }
         }
     }
@@ -283,10 +312,10 @@ fn actor_restart_cluster(
         };
 
         // Subscribe the new driver to the broadcaster
-        let control_rx = smol::block_on(broadcaster.subscribe());
+        let control_rx = broadcaster.subscribe().await;
 
         let event_tx_clone = event_tx.clone();
-        let driver = smol::block_on(driver::RaftDriver::new(
+        let driver = driver::RaftDriver::new(
             id,
             peers,
             &listen_addr,
@@ -295,7 +324,8 @@ fn actor_restart_cluster(
             control_rx,
             broadcaster.clone(),
             Some(event_tx_clone),
-        ))
+        )
+        .await
         .expect("Failed to start driver");
 
         // Reset visual state
@@ -308,31 +338,33 @@ fn actor_restart_cluster(
             paused: false,
         });
 
-        // Spawn running thread
+        // Spawn running task
         let node_id = id;
-        let handle = std::thread::spawn(move || {
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                smol::block_on(async {
-                    if let Err(e) = driver.run().await {
-                        eprintln!("Node {} driver failed: {}", node_id, e);
-                    }
-                });
-            }));
-            if let Err(_) = res {
-                eprintln!(
-                    "Node {} driver thread panicked (Expected for Leader heartbeat todo! in current crate)",
-                    node_id
-                );
+        let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let crashed_clone = crashed.clone();
+        let task = smol::spawn(async move {
+            let runner_fut = CatchUnwindFuture { inner: driver.run() };
+            match runner_fut.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    eprintln!("Node {} driver failed: {}", node_id, e);
+                    crashed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Err(panic_err) => {
+                    eprintln!("Node {} driver panicked: {:?}", node_id, panic_err);
+                    crashed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
             }
         });
 
         node_controls[id as usize] = Some(NodeControl {
-            join_handle: Some(handle),
+            task: Some(task),
+            crashed,
         });
     }
 
     // Broadcast the tick rate to all newly started drivers
-    smol::block_on(broadcaster.broadcast(driver::ConfigChange::TickInterval(current_tick_rate)));
+    broadcaster.broadcast(driver::ConfigChange::TickInterval(current_tick_rate)).await;
 }
 
 struct VisualizerActor {
@@ -351,14 +383,12 @@ impl VisualizerActor {
     fn update_crashed_nodes(&mut self) {
         for (id, control_opt) in self.node_controls.iter().enumerate() {
             if let Some(control) = control_opt {
-                if let Some(ref handle) = control.join_handle {
-                    if handle.is_finished() {
-                        if id < self.state.nodes.len() {
-                            if let Some(ref mut node_state) = self.state.nodes[id] {
-                                if node_state.role != "Crashed" {
-                                    node_state.role = "Crashed".to_string();
-                                    node_state.paused = true;
-                                }
+                if control.crashed.load(std::sync::atomic::Ordering::SeqCst) {
+                    if id < self.state.nodes.len() {
+                        if let Some(ref mut node_state) = self.state.nodes[id] {
+                            if node_state.role != "Crashed" {
+                                node_state.role = "Crashed".to_string();
+                                node_state.paused = true;
                             }
                         }
                     }
@@ -384,8 +414,8 @@ impl VisualizerActor {
         });
     }
 
-    fn run(mut self) {
-        while let Ok(msg) = self.actor_rx.recv_blocking() {
+    async fn run(mut self) {
+        while let Ok(msg) = self.actor_rx.recv().await {
             match msg {
                 VisualizerMessage::DriverEvent(event) => {
                     self.dirty = true;
@@ -481,12 +511,12 @@ impl VisualizerActor {
                         &self.event_tx,
                         &mut self.state,
                         &self.broadcaster,
-                    );
+                    ).await;
                     let _ = resp_tx.try_send(());
                     self.dirty = true;
                 }
                 VisualizerMessage::SetTickRate(ms, resp_tx) => {
-                    smol::block_on(self.broadcaster.broadcast(driver::ConfigChange::TickInterval(ms)));
+                    self.broadcaster.broadcast(driver::ConfigChange::TickInterval(ms)).await;
                     self.state.tick_rate_ms = ms;
                     let _ = resp_tx.try_send(true);
                     self.dirty = true;
@@ -497,10 +527,7 @@ impl VisualizerActor {
                         .get(node_id as usize)
                         .and_then(|c| c.as_ref())
                     {
-                        ctrl.join_handle
-                            .as_ref()
-                            .map(|h| h.is_finished())
-                            .unwrap_or(false)
+                        ctrl.crashed.load(std::sync::atomic::Ordering::SeqCst)
                     } else {
                         false
                     };
@@ -514,7 +541,7 @@ impl VisualizerActor {
                             &self.event_tx,
                             &mut self.state,
                             &self.broadcaster,
-                        );
+                        ).await;
                         let _ = resp_tx.try_send(Ok(NodeActionResponse {
                             success: true,
                             action: "restarted".to_string(),
@@ -522,13 +549,12 @@ impl VisualizerActor {
                         }));
                         self.dirty = true;
                     } else {
-                        // For per-node pause, we need to keep a separate mechanism
-                        // For now, broadcast pause to all nodes (cluster-wide pause)
+                        // Target pause/unpause to the specific node_id
                         let prev = self.state.nodes[node_id as usize]
                             .as_ref()
                             .map(|n| n.paused)
                             .unwrap_or(false);
-                        smol::block_on(self.broadcaster.broadcast(driver::ConfigChange::Pause(!prev)));
+                        self.broadcaster.broadcast(driver::ConfigChange::Pause { target_id: Some(node_id), paused: !prev }).await;
 
                         if let Some(ref mut node_state) = self.state.nodes[node_id as usize] {
                             node_state.paused = !prev;
@@ -779,24 +805,29 @@ fn main() {
 
             // Spawn driver running task
             let node_id = id as u64;
-            let handle = std::thread::spawn(move || {
-                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                    smol::block_on(async {
-                        if let Err(e) = driver.run().await {
-                            eprintln!("Node {} driver failed: {}", node_id, e);
-                        }
-                    });
-                }));
-                if let Err(_) = res {
-                    eprintln!(
-                        "Node {} driver thread panicked (Expected for Leader heartbeat todo! in current crate)",
-                        node_id
-                    );
+            let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let crashed_clone = crashed.clone();
+            let task = smol::spawn(async move {
+                let runner_fut = CatchUnwindFuture { inner: driver.run() };
+                match runner_fut.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        eprintln!("Node {} driver failed: {}", node_id, e);
+                        crashed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Err(panic_err) => {
+                        eprintln!(
+                            "Node {} driver thread panicked (Expected for Leader heartbeat todo! in current crate): {:?}",
+                            node_id, panic_err
+                        );
+                        crashed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                 }
             });
 
             node_controls[id] = Some(NodeControl {
-                join_handle: Some(handle),
+                task: Some(task),
+                crashed,
             });
         }
 
@@ -816,7 +847,7 @@ fn main() {
             broadcaster,
         };
         smol::spawn(async move {
-            actor.run();
+            actor.run().await;
         }).detach();
 
         // Spawn the background broadcast timer task (emits a tick every 50ms)
@@ -849,34 +880,31 @@ fn main() {
             info!("New TCP connection accepted from {}", addr);
             let actor_tx_clone = actor_tx.clone();
             
-            // Use std::thread::spawn with its own smol::block_on to avoid executor starvation
-            std::thread::spawn(move || {
-                info!("Processing HTTP request from {}", addr);
-                let result = smol::block_on(async move {
-                    // Use async-h1 to parse the HTTP request
-                    match async_h1::accept(stream, |req| async {
-                        info!("Received request: {} {}", req.method(), req.url().path());
-                        let response = handle_http_request(req, actor_tx_clone.clone()).await;
-                        match &response {
-                            Ok(resp) => {
-                                info!("Response status: {}", resp.status());
-                            }
-                            Err(e) => {
-                                error!("Handler error: {}", e);
-                            }
-                        }
-                        response
-                    }).await {
-                        Ok(_) => {
-                            info!("HTTP connection completed successfully for {}", addr);
+            // Process HTTP request in an asynchronous task on the unified executor
+            info!("Processing HTTP request from {}", addr);
+            smol::spawn(async move {
+                // Use async-h1 to parse the HTTP request
+                match async_h1::accept(stream, |req| async {
+                    info!("Received request: {} {}", req.method(), req.url().path());
+                    let response = handle_http_request(req, actor_tx_clone.clone()).await;
+                    match &response {
+                        Ok(resp) => {
+                            info!("Response status: {}", resp.status());
                         }
                         Err(e) => {
-                            error!("HTTP connection error for {}: {}", addr, e);
+                            error!("Handler error: {}", e);
                         }
                     }
-                });
-                result
-            });
+                    response
+                }).await {
+                    Ok(_) => {
+                        info!("HTTP connection completed successfully for {}", addr);
+                    }
+                    Err(e) => {
+                        error!("HTTP connection error for {}: {}", addr, e);
+                    }
+                }
+            }).detach();
         }
     });
 }

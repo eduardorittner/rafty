@@ -15,7 +15,7 @@ use raft::{Channel, InitialConfig, Node, Storage, ValidNodeId};
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigChange {
     Shutdown(bool),
-    Pause(bool),
+    Pause { target_id: Option<u64>, paused: bool },
     TickInterval(u64),
 }
 
@@ -153,8 +153,12 @@ pub fn write_framed_message<W: Write>(writer: &mut W, msg: &ProtoMessage) -> std
 /// Dispatches outgoing messages directly to the registered active connections.
 #[derive(Clone)]
 pub struct DriverChannel {
+    id: u64,
+    peer_addresses: Arc<Vec<Option<String>>>,
     active_connections: Arc<Mutex<Vec<Option<Arc<Mutex<TcpStream>>>>>>,
     event_tx: Option<Sender<DriverEvent>>,
+    broadcaster: ControlBroadcaster,
+    incoming_tx: Sender<ProtoMessage>,
 }
 
 impl Channel for DriverChannel {
@@ -162,21 +166,64 @@ impl Channel for DriverChannel {
         let to = msg.to;
         let active = self.active_connections.clone();
         let event_tx = self.event_tx.clone();
+        let peer_addresses = self.peer_addresses.clone();
+        let broadcaster = self.broadcaster.clone();
+        let incoming_tx = self.incoming_tx.clone();
+        let node_id = self.id;
         
         smol::spawn(async move {
             if let Some(ref tx) = event_tx {
                 let _ = tx.send(DriverEvent::MessageSent(msg.clone())).await;
             }
-            let connections = active.lock().await;
             let to_idx = to as usize;
-            if to_idx >= connections.len() {
-                tracing::warn!("No active connection to peer {}", to);
-                return;
-            }
-            if let Some(stream_arc) = &connections[to_idx] {
-                let stream = stream_arc.clone();
-                drop(connections);
-                let mut stream_guard = stream.lock().await;
+
+            let stream_arc = {
+                let mut connections = active.lock().await;
+                if to_idx >= connections.len() {
+                    connections.resize_with(to_idx + 1, || None);
+                }
+                if connections[to_idx].is_none() {
+                    let peer_addr_opt = peer_addresses.get(to_idx).and_then(|opt| opt.as_ref());
+                    if let Some(peer_addr) = peer_addr_opt {
+                        tracing::debug!("Connecting on-demand to peer {} at {}", to, peer_addr);
+                        match TcpStream::connect(peer_addr).await {
+                            Ok(stream) => {
+                                let _ = stream.set_nodelay(true);
+                                let stream_arc = Arc::new(Mutex::new(stream.clone()));
+                                connections[to_idx] = Some(stream_arc.clone());
+
+                                // Spawn incoming reader task for this stream
+                                let handler_control_rx = broadcaster.subscribe().await;
+                                let incoming_tx = incoming_tx.clone();
+                                let event_tx = event_tx.clone();
+                                smol::spawn(async move {
+                                    handle_incoming_stream(
+                                        node_id,
+                                        stream,
+                                        incoming_tx,
+                                        handler_control_rx,
+                                        event_tx,
+                                    ).await;
+                                }).detach();
+
+                                Some(stream_arc)
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to connect to peer {} at {}: {}", to, peer_addr, e);
+                                None
+                            }
+                        }
+                    } else {
+                        tracing::warn!("No peer address configured for node {}", to);
+                        None
+                    }
+                } else {
+                    connections[to_idx].clone()
+                }
+            };
+
+            if let Some(stream_arc) = stream_arc {
+                let mut stream_guard = stream_arc.lock().await;
                 if let Err(e) = write_framed_message_async(&mut *stream_guard, &msg).await {
                     tracing::error!("Failed to send message to peer {}: {}", to, e);
                     let mut active_conns = active.lock().await;
@@ -184,8 +231,6 @@ impl Channel for DriverChannel {
                         active_conns[to_idx] = None;
                     }
                 }
-            } else {
-                tracing::warn!("No active connection to peer {}", to);
             }
         }).detach();
     }
@@ -193,14 +238,62 @@ impl Channel for DriverChannel {
     fn broadcast(&mut self, msg: ProtoMessage) {
         let active = self.active_connections.clone();
         let event_tx = self.event_tx.clone();
+        let peer_addresses = self.peer_addresses.clone();
+        let broadcaster = self.broadcaster.clone();
+        let incoming_tx = self.incoming_tx.clone();
+        let node_id = self.id;
         
         smol::spawn(async move {
-            let connections = active.lock().await.clone();
+            let num_peers = peer_addresses.len();
             let mut failed_peers = Vec::new();
-            for (peer_id, stream_arc_opt) in connections.iter().enumerate() {
-                if let Some(stream_arc) = stream_arc_opt {
-                    let stream = stream_arc.clone();
-                    let mut stream_guard = stream.lock().await;
+            
+            for peer_id in 0..num_peers {
+                if peer_addresses.get(peer_id).and_then(|opt| opt.as_ref()).is_none() {
+                    continue;
+                }
+                
+                let stream_arc = {
+                    let mut connections = active.lock().await;
+                    if peer_id >= connections.len() {
+                        connections.resize_with(peer_id + 1, || None);
+                    }
+                    if connections[peer_id].is_none() {
+                        let peer_addr = peer_addresses[peer_id].as_ref().unwrap();
+                        tracing::debug!("Broadcasting: Connecting on-demand to peer {} at {}", peer_id, peer_addr);
+                        match TcpStream::connect(peer_addr).await {
+                            Ok(stream) => {
+                                let _ = stream.set_nodelay(true);
+                                let stream_arc = Arc::new(Mutex::new(stream.clone()));
+                                connections[peer_id] = Some(stream_arc.clone());
+
+                                // Spawn incoming reader task for this stream
+                                let handler_control_rx = broadcaster.subscribe().await;
+                                let incoming_tx = incoming_tx.clone();
+                                let event_tx = event_tx.clone();
+                                smol::spawn(async move {
+                                    handle_incoming_stream(
+                                        node_id,
+                                        stream,
+                                        incoming_tx,
+                                        handler_control_rx,
+                                        event_tx,
+                                    ).await;
+                                }).detach();
+
+                                Some(stream_arc)
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to connect to peer {} during broadcast: {}", peer_id, e);
+                                None
+                            }
+                        }
+                    } else {
+                        connections[peer_id].clone()
+                    }
+                };
+
+                if let Some(stream_arc) = stream_arc {
+                    let mut stream_guard = stream_arc.lock().await;
                     let mut msg_copy = msg.clone();
                     msg_copy.to = peer_id as u64;
                     if let Some(ref tx) = event_tx {
@@ -212,11 +305,13 @@ impl Channel for DriverChannel {
                     }
                 }
             }
-            drop(connections);
-            let mut active_conns = active.lock().await;
-            for peer_id in failed_peers {
-                if peer_id < active_conns.len() {
-                    active_conns[peer_id] = None;
+
+            if !failed_peers.is_empty() {
+                let mut active_conns = active.lock().await;
+                for peer_id in failed_peers {
+                    if peer_id < active_conns.len() {
+                        active_conns[peer_id] = None;
+                    }
                 }
             }
         }).detach();
@@ -226,6 +321,7 @@ impl Channel for DriverChannel {
 /// Reads messages from an incoming TCP stream and forwards them to the channel.
 /// Listens for shutdown/pause from its own control_rx subscription.
 async fn handle_incoming_stream(
+    node_id: u64,
     mut read_stream: TcpStream,
     sender: Sender<ProtoMessage>,
     control_rx: Receiver<ConfigChange>,
@@ -239,7 +335,11 @@ async fn handle_incoming_stream(
         while let Ok(change) = control_rx.try_recv() {
             match change {
                 ConfigChange::Shutdown(val) => shutdown = val,
-                ConfigChange::Pause(val) => paused = val,
+                ConfigChange::Pause { target_id, paused: val } => {
+                    if target_id.is_none() || target_id == Some(node_id) {
+                        paused = val;
+                    }
+                }
                 ConfigChange::TickInterval(_) => {}
             }
         }
@@ -281,157 +381,12 @@ async fn handle_incoming_stream(
     }
 }
 
-/// Manages outgoing connection to a peer, handling reconnection and message reading.
-/// Listens for shutdown/pause from its own control_rx subscription.
-async fn manage_peer_connection(
-    peer_id: u64,
-    peer_addr: String,
-    active_connections: Arc<Mutex<Vec<Option<Arc<Mutex<TcpStream>>>>>>,
-    sender: Sender<ProtoMessage>,
-    control_rx: Receiver<ConfigChange>,
-    event_tx: Option<Sender<DriverEvent>>,
-) {
-    let mut shutdown = false;
-    let mut paused = false;
-
-    while !shutdown {
-        // Process control changes first
-        while let Ok(change) = control_rx.try_recv() {
-            match change {
-                ConfigChange::Shutdown(val) => shutdown = val,
-                ConfigChange::Pause(val) => paused = val,
-                ConfigChange::TickInterval(_) => {}
-            }
-        }
-
-        if shutdown {
-            break;
-        }
-
-        if paused {
-            smol::Timer::after(Duration::from_millis(50)).await;
-            continue;
-        }
-
-        tracing::debug!(
-            "Attempting to connect to peer {} at {}",
-            peer_id,
-            peer_addr
-        );
-        match TcpStream::connect(&peer_addr).await {
-            Ok(stream) => {
-                if let Err(e) = stream.set_nodelay(true) {
-                    tracing::error!(
-                        "Failed to set TCP nodelay on outgoing connection to {}: {}",
-                        peer_id,
-                        e
-                    );
-                }
-                
-                let stream_arc = Arc::new(Mutex::new(stream));
-
-                // Register the connection
-                {
-                    let mut active = active_connections.lock().await;
-                    let peer_idx = peer_id as usize;
-                    if peer_idx >= active.len() {
-                        active.resize_with(peer_idx + 1, || None);
-                    }
-                    active[peer_idx] = Some(stream_arc.clone());
-                }
-
-                let mut read_stream = stream_arc.lock().await;
-                
-                while !shutdown {
-                    // Process control changes in inner loop too
-                    while let Ok(change) = control_rx.try_recv() {
-                        match change {
-                            ConfigChange::Shutdown(val) => shutdown = val,
-                            ConfigChange::Pause(val) => paused = val,
-                            ConfigChange::TickInterval(_) => {}
-                        }
-                    }
-
-                    if shutdown {
-                        break;
-                    }
-
-                    if paused {
-                        smol::Timer::after(Duration::from_millis(50)).await;
-                        continue;
-                    }
-
-                    match read_framed_message_async(&mut *read_stream).await {
-                        Ok(msg) => {
-                            if let Some(ref tx) = event_tx {
-                                let _ = tx.send(DriverEvent::MessageReceived(
-                                    msg.clone(),
-                                )).await;
-                            }
-                            if sender.send(msg).await.is_err() {
-                                break; // Receiver disconnected
-                            }
-                        }
-                        Err(ref e)
-                            if e.kind() == std::io::ErrorKind::WouldBlock
-                                || e.kind() == std::io::ErrorKind::TimedOut
-                                || e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                        {
-                            smol::Timer::after(Duration::from_millis(10)).await;
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Outgoing connection to peer {} read failed: {}",
-                                peer_id,
-                                e
-                            );
-                            break;
-                        }
-                    }
-                }
-
-                // Deregister connection upon disconnection
-                {
-                    let mut active = active_connections.lock().await;
-                    let peer_idx = peer_id as usize;
-                    if peer_idx < active.len() {
-                        active[peer_idx] = None;
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Failed to connect to peer {}: {}. Retrying...",
-                    peer_id,
-                    e
-                );
-                // Wait and check shutdown flag periodically to allow fast shutdown
-                for _ in 0..10 {
-                    // Also check control_rx during retry wait
-                    while let Ok(change) = control_rx.try_recv() {
-                        match change {
-                            ConfigChange::Shutdown(val) => shutdown = val,
-                            _ => {}
-                        }
-                    }
-                    if shutdown {
-                        break;
-                    }
-                    smol::Timer::after(Duration::from_millis(50)).await;
-                }
-            }
-        }
-    }
-}
-
 /// A driver for a Raft node that handles TCP networking, connection management,
 /// and periodic ticking using async tasks.
 pub struct RaftDriver<Store: Storage> {
     pub node: Node<Store, DriverChannel>,
     receiver: Receiver<ProtoMessage>,
     control_rx: Receiver<ConfigChange>,
-    peer_tasks: Vec<smol::Task<()>>,
     listener_task: Option<smol::Task<()>>,
     local_addr: SocketAddr,
     event_tx: Option<Sender<DriverEvent>>,
@@ -489,6 +444,7 @@ impl<Store: Storage> RaftDriver<Store> {
                         let event_tx_clone = event_tx_clone.clone();
                         smol::spawn(async move {
                             handle_incoming_stream(
+                                id,
                                 stream,
                                 sender_clone,
                                 handler_control_rx,
@@ -507,38 +463,17 @@ impl<Store: Storage> RaftDriver<Store> {
             }
         });
 
-        // Spawn individual outgoing connection manager tasks for each peer
-        let mut peer_tasks = Vec::new();
-        for (peer_id, peer_addr_opt) in peers.iter().enumerate() {
-            if let Some(peer_addr) = peer_addr_opt {
-                let peer_id = peer_id as u64;
-                let peer_addr = peer_addr.clone();
-                let active_connections_clone = Arc::clone(&active_connections);
-                let sender_clone = sender.clone();
-                let event_tx_clone = event_tx.clone();
-                // Each peer task gets its own control_rx subscription from broadcaster
-                let peer_control_rx = broadcaster.subscribe().await;
-                let handle = smol::spawn(async move {
-                    manage_peer_connection(
-                        peer_id,
-                        peer_addr,
-                        active_connections_clone,
-                        sender_clone,
-                        peer_control_rx,
-                        event_tx_clone,
-                    ).await;
-                });
-                peer_tasks.push(handle);
-            }
-        }
-
         let valid_id = ValidNodeId(std::num::NonZeroU64::new(id).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "Node ID must be non-zero")
         })?);
 
         let channel = DriverChannel {
+            id,
+            peer_addresses: Arc::new(peers),
             active_connections: Arc::clone(&active_connections),
             event_tx: event_tx.clone(),
+            broadcaster: broadcaster.clone(),
+            incoming_tx: sender,
         };
 
         let node = Node::new(valid_id, storage, channel, config);
@@ -547,7 +482,6 @@ impl<Store: Storage> RaftDriver<Store> {
             node,
             receiver,
             control_rx,
-            peer_tasks,
             listener_task: Some(listener_task),
             local_addr,
             event_tx,
@@ -613,13 +547,15 @@ impl<Store: Storage> RaftDriver<Store> {
                             }).await;
                         }
                     }
-                    ConfigChange::Pause(val) => {
-                        paused = val;
-                        if let Some(ref tx) = self.event_tx {
-                            let _ = tx.send(DriverEvent::Paused {
-                                id: u64::from(self.node.id),
-                                paused: val,
-                            }).await;
+                    ConfigChange::Pause { target_id, paused: val } => {
+                        if target_id.is_none() || target_id == Some(u64::from(self.node.id)) {
+                            paused = val;
+                            if let Some(ref tx) = self.event_tx {
+                                let _ = tx.send(DriverEvent::Paused {
+                                    id: u64::from(self.node.id),
+                                    paused: val,
+                                }).await;
+                            }
                         }
                     }
                     ConfigChange::TickInterval(val) => {
@@ -728,7 +664,6 @@ impl<Store: Storage> Drop for RaftDriver<Store> {
         // Tasks are automatically cancelled when dropped
         // Just take them to ensure they're cleaned up
         let _ = self.listener_task.take();
-        let _ = std::mem::take(&mut self.peer_tasks);
     }
 }
 
