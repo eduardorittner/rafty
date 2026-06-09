@@ -12,7 +12,7 @@ use tracing::{debug, error, info};
 
 #[derive(Debug)]
 pub struct Node<Store: Storage, Chan: Channel> {
-    pub id: NodeId,
+    pub id: ValidNodeId,
     /// Current term.
     pub term: u64,
     /// Which peer this node voted for.
@@ -133,7 +133,7 @@ impl Default for LeaderState {
 impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     pub fn new(id: ValidNodeId, storage: Store, channel: Chan, config: InitialConfig) -> Self {
         let mut node = Self {
-            id: id.into(),
+            id,
             voted_for: INVALID_ID,
             leader_id: INVALID_ID,
             role: Role::Follower(FollowerState::default()),
@@ -228,7 +228,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     }
 
     pub fn start_term(&mut self) {
-        self.voted_for = self.id;
+        self.voted_for = self.id.into();
         self.leader_id = INVALID_ID;
         self.generate_random_election_timeout();
     }
@@ -430,15 +430,13 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             follower_progress.push(FollowerProgress::new(last_index));
         }
 
-        let mut role = self.role.to_owned().become_leader();
-
         if let Role::Leader(state) = &mut self.role {
             state.ticks_since_last_heartbeat = 0;
             state.follower_progress = follower_progress;
         }
 
         self.start_term();
-        self.leader_id = self.id;
+        self.leader_id = self.id.into();
         info!("Node {:?} became leader at term {}", self.id, self.term);
 
         // Immediately replicate to all followers

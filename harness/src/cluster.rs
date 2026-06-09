@@ -86,7 +86,7 @@ impl Cluster {
         F: FnMut(NodeId) -> bool,
     {
         for node in &mut self.nodes {
-            if predicate(node.id)
+            if predicate(node.id.into())
                 && let Ok(msg) = node.channel.recv.try_recv()
             {
                 node.step(msg.into()).unwrap();

@@ -1,6 +1,6 @@
 use harness::{Cluster, ONLY_FAULT};
 use proto::proto::{ProtoMessage, ProtoMessageType};
-use raft::{INVALID_ID, Role};
+use raft::{INVALID_ID, NodeId, Role};
 use test_log::test;
 
 #[test]
@@ -17,7 +17,7 @@ fn start_campaign() {
     // a campaign
     candidate.tick();
     assert!(matches!(candidate.role, Role::Candidate(_)));
-    assert_eq!(candidate.id, candidate.voted_for);
+    assert_eq!(candidate.voted_for, NodeId::from(candidate.id));
 
     // All nodes should have received a `RequestVote` message
     for node in &mut cluster.nodes {
@@ -48,7 +48,7 @@ fn elect_leader() {
 
     // After `election_timeout` ticks, becomes a candidate
     assert!(matches!(candidate.role, Role::Candidate(_)));
-    assert_eq!(candidate.id, candidate.voted_for);
+    assert_eq!(candidate.voted_for, NodeId::from(candidate.id));
 
     cluster.step();
     for _ in 0..cluster.nodes.len() {
@@ -79,7 +79,7 @@ fn elect_leader_right_after_majority() {
 
     // After `election_timeout` ticks, becomes a candidate
     assert!(matches!(candidate.role, Role::Candidate(_)));
-    assert_eq!(candidate.id, candidate.voted_for);
+    assert_eq!(candidate.voted_for, NodeId::from(candidate.id));
 
     let cluster_size = candidate.config.cluster_size;
     for (id, node) in cluster.nodes.iter_mut().enumerate() {
@@ -122,7 +122,7 @@ fn leader_not_elected_with_one_vote() {
 
     // After `election_timeout` ticks, becomes a candidate
     assert!(matches!(candidate.role, Role::Candidate(_)));
-    assert_eq!(candidate.id, candidate.voted_for);
+    assert_eq!(candidate.voted_for, NodeId::from(candidate.id));
 
     for node in &mut cluster.nodes {
         let msg = node.channel.recv.try_recv();
