@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::num::NonZeroU64;
 
 use crate::Error;
@@ -22,8 +22,20 @@ impl Display for NodeId {
 }
 
 /// A valid node id that is guaranteed to be non-zero.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ValidNodeId(pub NonZeroU64);
+
+impl Display for ValidNodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}]", self.0.get())
+    }
+}
+
+impl Debug for ValidNodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}]", self.0.get())
+    }
+}
 
 impl From<u64> for NodeId {
     fn from(value: u64) -> NodeId {
