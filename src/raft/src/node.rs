@@ -27,7 +27,7 @@ pub struct Node<Store: Storage, Chan: Channel> {
     /// Raft persisted log store.
     // TODO: we should add an intermediate `RaftLog<T: Storage>` which uses the underlying storage
     // so we can reuse most of the raft log logic independently from the backing store
-    storage: RaftLog<Store>,
+    pub storage: RaftLog<Store>,
     /// Channel for sending messages
     pub channel: Chan,
     /// If a follower does not receive any message in [election_timeout] ticks, it
@@ -452,7 +452,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                 self.role = self.role.to_owned().become_follower();
             }
         } else if req.leader_term < self.term {
-            self.send_append_response(false);
+            self.send_append_response_to(false, req.from);
             return Ok(());
         }
 
@@ -592,9 +592,14 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
 
     /// Send AppendEntries response to leader.
     fn send_append_response(&mut self, success: bool) {
+        self.send_append_response_to(success, self.leader_id.into());
+    }
+
+    /// Send AppendEntries response to a specific node.
+    fn send_append_response_to(&mut self, success: bool, to: u64) {
         self.channel.send(
             Message::AppendResponse(AppendResponse {
-                to: self.leader_id.into(),
+                to,
                 from: self.id.into(),
                 term: self.term,
                 success,
