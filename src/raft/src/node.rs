@@ -124,7 +124,7 @@ impl CandidateState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeaderState {
-    ticks_since_last_heartbeat: u64,
+    pub ticks_since_last_heartbeat: u64,
     /// Per-follower progress tracking, indexed by node ID.
     pub follower_progress: NodeMap<FollowerProgress>,
 }

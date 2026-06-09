@@ -1,30 +1,17 @@
 use harness::Cluster;
 use proto::proto::{Append, AppendResponse, Entry, Message};
-use raft::{Channel, Role, Storage};
+use raft::{Channel, Role, Storage, ValidNodeId};
 use test_log::test;
 
 #[test]
 fn append_entries_empty_log_success() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    assert!(matches!(leader.role, Role::Candidate(_)));
-
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Leader sends AppendEntries to followers after becoming leader
     // Manually create and send an AppendEntries message to a follower
     let append = Message::Append(Append {
         to: cluster.nodes[0].id.into(),
-        from: leader.id.into(),
+        from: cluster.get(1).id.into(),
         leader_term: 1,
         leader_commit: 0,
         last_index: 0,
@@ -37,7 +24,8 @@ fn append_entries_empty_log_success() {
     cluster.step();
 
     // Follower should have sent success response
-    let response = leader
+    let response = cluster
+        .get_mut(1)
         .channel
         .recv
         .try_recv()
@@ -53,18 +41,7 @@ fn append_entries_empty_log_success() {
 
 #[test]
 fn append_entries_log_match_success() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Manually append an entry to leader's log
     let entry = Entry {
@@ -72,12 +49,12 @@ fn append_entries_log_match_success() {
         index: 1,
         data: vec![1, 2, 3],
     };
-    leader.storage.store.append(vec![entry.clone()]).unwrap();
+    cluster.get_mut(1).storage.store.append(vec![entry.clone()]).unwrap();
 
     // Send AppendEntries with the new entry to a follower
     let append = Message::Append(Append {
         to: cluster.nodes[0].id.into(),
-        from: leader.id.into(),
+        from: cluster.get(1).id.into(),
         leader_term: 1,
         leader_commit: 0,
         last_index: 0, // prev_log_index is 0 (empty log before this)
@@ -90,7 +67,8 @@ fn append_entries_log_match_success() {
     cluster.step();
 
     // Follower should accept and send success response
-    let response = leader
+    let response = cluster
+        .get_mut(1)
         .channel
         .recv
         .try_recv()
@@ -120,18 +98,7 @@ fn append_entries_log_match_success() {
 
 #[test]
 fn append_entries_prev_log_mismatch_reject() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Follower has an entry at index 1 with term 1
     let follower_entry = Entry {
@@ -153,7 +120,7 @@ fn append_entries_prev_log_mismatch_reject() {
     };
     let append = Message::Append(Append {
         to: cluster.nodes[0].id.into(),
-        from: leader.id.into(),
+        from: cluster.get(1).id.into(),
         leader_term: 2, // Higher term
         leader_commit: 0,
         last_index: 1, // prev_log_index is 1
@@ -166,7 +133,8 @@ fn append_entries_prev_log_mismatch_reject() {
     cluster.step();
 
     // Follower should reject and send failure response
-    let response = leader
+    let response = cluster
+        .get_mut(1)
         .channel
         .recv
         .try_recv()
@@ -186,18 +154,7 @@ fn append_entries_prev_log_mismatch_reject() {
 
 #[test]
 fn append_entries_prev_log_missing_reject() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Leader sends AppendEntries with prev_log_index beyond follower's empty log
     let entry = Entry {
@@ -207,7 +164,7 @@ fn append_entries_prev_log_missing_reject() {
     };
     let append = Message::Append(Append {
         to: cluster.nodes[0].id.into(),
-        from: leader.id.into(),
+        from: cluster.get(1).id.into(),
         leader_term: 1,
         leader_commit: 0,
         last_index: 4, // prev_log_index is 4, but follower's log is empty
@@ -220,7 +177,8 @@ fn append_entries_prev_log_missing_reject() {
     cluster.step();
 
     // Follower should reject and send failure response
-    let response = leader
+    let response = cluster
+        .get_mut(1)
         .channel
         .recv
         .try_recv()
@@ -239,19 +197,7 @@ fn append_entries_prev_log_missing_reject() {
 
 #[test]
 fn append_entries_higher_term_updates_follower() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader at term 1
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
-    assert_eq!(leader.term, 1);
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Follower is at term 1
     assert_eq!(cluster.nodes[0].term, 1);
@@ -264,7 +210,7 @@ fn append_entries_higher_term_updates_follower() {
     };
     let append = Message::Append(Append {
         to: cluster.nodes[0].id.into(),
-        from: leader.id.into(),
+        from: cluster.get(1).id.into(),
         leader_term: 2, // Higher term
         leader_commit: 0,
         last_index: 0,
@@ -283,7 +229,8 @@ fn append_entries_higher_term_updates_follower() {
     assert_eq!(cluster.nodes[0].storage.store.last_index(), 1);
 
     // Follower should send success response
-    let response = leader
+    let response = cluster
+        .get_mut(1)
         .channel
         .recv
         .try_recv()
@@ -300,19 +247,7 @@ fn append_entries_higher_term_updates_follower() {
 
 #[test]
 fn append_entries_lower_term_rejected() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
-    assert_eq!(leader.term, 1);
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Follower starts a new election and becomes candidate at term 2
     let mut follower = cluster.remove(2);
@@ -331,7 +266,7 @@ fn append_entries_lower_term_rejected() {
     };
     let append = Message::Append(Append {
         to: follower.id.into(),
-        from: leader.id.into(),
+        from: cluster.get(1).id.into(),
         leader_term: 1, // Lower than follower's term
         leader_commit: 0,
         last_index: 0,
@@ -354,18 +289,7 @@ fn append_entries_lower_term_rejected() {
 
 #[test]
 fn append_entries_commit_index_advancement() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Leader appends an entry
     let entry = Entry {
@@ -373,13 +297,14 @@ fn append_entries_commit_index_advancement() {
         index: 1,
         data: vec![1, 2, 3],
     };
-    leader.storage.store.append(vec![entry.clone()]).unwrap();
+    cluster.get_mut(1).storage.store.append(vec![entry.clone()]).unwrap();
 
     // Send AppendEntries to followers
+    let leader_id = cluster.get(1).id.into();
     for node in &mut cluster.nodes {
         let append = Message::Append(Append {
             to: node.id.into(),
-            from: leader.id.into(),
+            from: leader_id,
             leader_term: 1,
             leader_commit: 0,
             last_index: 0,
@@ -393,8 +318,8 @@ fn append_entries_commit_index_advancement() {
     cluster.step();
 
     // All followers should accept and send success responses
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
+    while let Ok(msg) = cluster.get_mut(1).channel.recv.try_recv() {
+        cluster.get_mut(1).step(msg.into()).unwrap();
     }
 
     // Leader should have replicated to enough followers
@@ -407,18 +332,7 @@ fn append_entries_commit_index_advancement() {
 
 #[test]
 fn append_entries_leader_response_success() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Leader has entry at index 1
     let entry = Entry {
@@ -426,11 +340,11 @@ fn append_entries_leader_response_success() {
         index: 1,
         data: vec![1, 2, 3],
     };
-    leader.storage.store.append(vec![entry]).unwrap();
+    cluster.get_mut(1).storage.store.append(vec![entry]).unwrap();
 
     // Get initial follower progress
     let initial_next_index = {
-        if let Role::Leader(ref state) = leader.role {
+        if let Role::Leader(ref state) = cluster.get(1).role {
             state.follower_progress[cluster.nodes[0].id].next_index
         } else {
             panic!("Leader should be leader");
@@ -439,20 +353,20 @@ fn append_entries_leader_response_success() {
 
     // Send successful AppendEntries response from follower
     let response = Message::AppendResponse(AppendResponse {
-        to: leader.id.into(),
+        to: cluster.get(1).id.into(),
         from: cluster.nodes[0].id.into(),
         term: 1,
         success: true,
     });
-    leader.channel.send(response.into());
+    cluster.get_mut(1).channel.send(response.into());
 
     // Leader processes the response
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
+    while let Ok(msg) = cluster.get_mut(1).channel.recv.try_recv() {
+        cluster.get_mut(1).step(msg.into()).unwrap();
     }
 
     // Verify follower progress was updated
-    if let Role::Leader(ref state) = leader.role {
+    if let Role::Leader(ref state) = cluster.get(1).role {
         let progress = &state.follower_progress[cluster.nodes[0].id];
         // next_index should have advanced
         assert!(progress.next_index >= initial_next_index);
@@ -464,22 +378,11 @@ fn append_entries_leader_response_success() {
 
 #[test]
 fn append_entries_leader_response_failure_backtrack() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Get initial follower progress
     let initial_next_index = {
-        if let Role::Leader(ref state) = leader.role {
+        if let Role::Leader(ref state) = cluster.get(1).role {
             state.follower_progress[cluster.nodes[0].id].next_index
         } else {
             panic!("Leader should be leader");
@@ -488,20 +391,20 @@ fn append_entries_leader_response_failure_backtrack() {
 
     // Send failed AppendEntries response from follower
     let response = Message::AppendResponse(AppendResponse {
-        to: leader.id.into(),
+        to: cluster.get(1).id.into(),
         from: cluster.nodes[0].id.into(),
         term: 1,
         success: false,
     });
-    leader.channel.send(response.into());
+    cluster.get_mut(1).channel.send(response.into());
 
     // Leader processes the response
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
+    while let Ok(msg) = cluster.get_mut(1).channel.recv.try_recv() {
+        cluster.get_mut(1).step(msg.into()).unwrap();
     }
 
     // Verify follower progress was decremented
-    if let Role::Leader(ref state) = leader.role {
+    if let Role::Leader(ref state) = cluster.get(1).role {
         let progress = &state.follower_progress[cluster.nodes[0].id];
         // next_index should have decreased
         assert!(progress.next_index <= initial_next_index);
@@ -513,19 +416,7 @@ fn append_entries_leader_response_failure_backtrack() {
 
 #[test]
 fn append_entries_log_conflict_resolution() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader at term 1
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
-    assert_eq!(leader.term, 1);
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Follower has conflicting entry at index 1 with term 1
     let conflicting_entry = Entry {
@@ -540,13 +431,14 @@ fn append_entries_log_conflict_resolution() {
         .unwrap();
 
     // Leader at term 2 sends entry at index 1 with term 2
-    leader.term = 2;
+    cluster.get_mut(1).term = 2;
     let leader_entry = Entry {
         term: 2,
         index: 1,
         data: vec![1, 2, 3],
     };
-    leader
+    cluster
+        .get_mut(1)
         .storage
         .store
         .append(vec![leader_entry.clone()])
@@ -555,7 +447,7 @@ fn append_entries_log_conflict_resolution() {
     // Leader sends AppendEntries to overwrite follower's entry
     let append = Message::Append(Append {
         to: cluster.nodes[0].id.into(),
-        from: leader.id.into(),
+        from: cluster.get(1).id.into(),
         leader_term: 2,
         leader_commit: 0,
         last_index: 0, // Start from beginning
@@ -568,7 +460,8 @@ fn append_entries_log_conflict_resolution() {
     cluster.step();
 
     // Follower should accept and overwrite the conflicting entry
-    let response = leader
+    let response = cluster
+        .get_mut(1)
         .channel
         .recv
         .try_recv()
@@ -590,23 +483,12 @@ fn append_entries_log_conflict_resolution() {
 
 #[test]
 fn append_entries_heartbeat_empty_entries() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Send empty AppendEntries (heartbeat) to follower
     let append = Message::Append(Append {
         to: cluster.nodes[0].id.into(),
-        from: leader.id.into(),
+        from: cluster.get(1).id.into(),
         leader_term: 1,
         leader_commit: 0,
         last_index: 0,
@@ -619,7 +501,8 @@ fn append_entries_heartbeat_empty_entries() {
     cluster.step();
 
     // Follower should accept and send success response
-    let response = leader
+    let response = cluster
+        .get_mut(1)
         .channel
         .recv
         .try_recv()
@@ -638,19 +521,7 @@ fn append_entries_heartbeat_empty_entries() {
 
 #[test]
 fn append_entries_stale_leader_steps_down() {
-    let mut cluster = Cluster::new();
-
-    // Elect node 1 as leader at term 1
-    let mut leader = cluster.remove(1);
-    for _ in 0..leader.election_timeout {
-        leader.tick();
-    }
-    cluster.step();
-    while let Ok(msg) = leader.channel.recv.try_recv() {
-        leader.step(msg.into()).unwrap();
-    }
-    assert!(matches!(leader.role, Role::Leader(_)));
-    assert_eq!(leader.term, 1);
+    let mut cluster = Cluster::new().with_leader(ValidNodeId::new(1).unwrap());
 
     // Another node becomes candidate at term 2
     let mut candidate = cluster.remove(2);
@@ -661,7 +532,6 @@ fn append_entries_stale_leader_steps_down() {
     assert_eq!(candidate.term, 2);
 
     // Reinsert both nodes so messages can be properly routed through the cluster network
-    cluster.add(leader);
     cluster.add(candidate);
 
     let leader_id = 1u64;

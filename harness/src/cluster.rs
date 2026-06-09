@@ -2,7 +2,9 @@ use std::num::NonZeroU64;
 use std::sync::mpsc::channel;
 
 use proto::proto::ProtoMessage;
-use raft::{InitialConfig, Node, NodeId, ValidNodeId};
+use raft::{
+    FollowerProgress, InitialConfig, LeaderState, Node, NodeId, NodeMap, Role, ValidNodeId,
+};
 
 use crate::{FaultRate, FaultyChannel, MemStorage, NO_FAULT, TestChannel, TestNode};
 
@@ -13,6 +15,24 @@ pub struct Cluster {
 impl Cluster {
     pub fn new() -> Self {
         Self::from_drop_rate(NO_FAULT)
+    }
+
+    pub fn with_leader(mut self, leader_id: ValidNodeId) -> Self {
+        let nodes_len = self.nodes.len() as u64;
+
+        for node in &mut self.nodes {
+            node.term = 1;
+            node.leader_id = leader_id.into();
+        }
+
+        let leader = self.get_mut(leader_id.into());
+        leader.role = Role::Leader(LeaderState {
+            ticks_since_last_heartbeat: 0,
+            follower_progress: NodeMap::new(nodes_len, leader_id, FollowerProgress::new(0)),
+        });
+
+        assert!(matches!(leader.role, Role::Leader(_)));
+        self
     }
 
     pub fn from_drop_rate(drop_rate: FaultRate) -> Self {
@@ -78,6 +98,22 @@ impl Cluster {
             }
         }
         acc
+    }
+
+    /// Gets a reference to a node by its ID.
+    pub fn get(&self, id: u64) -> &TestNode {
+        self.nodes
+            .iter()
+            .find(|n| u64::from(n.id) == id)
+            .expect("Node not found in cluster")
+    }
+
+    /// Gets a mutable reference to a node by its ID.
+    pub fn get_mut(&mut self, id: u64) -> &mut TestNode {
+        self.nodes
+            .iter_mut()
+            .find(|n| u64::from(n.id) == id)
+            .expect("Node not found in cluster")
     }
 
     /// Steps every node that passes filter with a message at most once
