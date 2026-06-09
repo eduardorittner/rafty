@@ -1,11 +1,12 @@
+use crate::RaftLog;
 use crate::communication::Channel;
-use crate::node_id::{NodeId, ValidNodeId, INVALID_ID};
+use crate::config::InitialConfig;
+use crate::error::Result;
+use crate::node_id::{INVALID_ID, NodeId, ValidNodeId};
+use crate::node_map::NodeMap;
 use crate::progress::FollowerProgress;
 use crate::quorum::{Quorum, Vote};
 use crate::storage::Storage;
-use crate::RaftLog;
-use crate::config::InitialConfig;
-use crate::error::Result;
 use proto::proto::*;
 use rand::RngExt;
 use tracing::{debug, error, info};
@@ -57,10 +58,17 @@ impl Role {
     }
 
     #[inline]
-    fn become_leader(self) -> Role {
+    fn become_leader(self, cluster_size: u64, self_id: ValidNodeId, last_index: u64) -> Role {
         match self {
             Role::Follower(_) => panic!("Invalid state transition: [follower -> leader]"),
-            Role::Candidate(_) => Role::Leader(LeaderState::default()),
+            Role::Candidate(_) => Role::Leader(LeaderState {
+                ticks_since_last_heartbeat: 0,
+                follower_progress: NodeMap::new(
+                    cluster_size,
+                    self_id,
+                    FollowerProgress::new(last_index),
+                ),
+            }),
             Role::Leader(_) => panic!("Invalid state transition: [leader -> leader]"),
         }
     }
@@ -117,17 +125,8 @@ impl CandidateState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LeaderState {
     ticks_since_last_heartbeat: u64,
-    /// Per-follower progress tracking, indexed by node ID (1-indexed, so index 0 is unused).
-    pub follower_progress: Vec<FollowerProgress>,
-}
-
-impl Default for LeaderState {
-    fn default() -> Self {
-        Self {
-            ticks_since_last_heartbeat: 0,
-            follower_progress: Vec::new(),
-        }
-    }
+    /// Per-follower progress tracking, indexed by node ID.
+    pub follower_progress: NodeMap<FollowerProgress>,
 }
 
 impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
@@ -183,7 +182,12 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                 }
 
                 if state.votes.has_majority_for() {
-                    self.become_leader()
+                    let last_index = self.storage.store.last_index();
+                    self.role = self.role.to_owned().become_leader(
+                        self.config.cluster_size,
+                        self.id,
+                        last_index,
+                    );
                 }
             }
             Role::Leader(LeaderState {
@@ -355,7 +359,12 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
 
                 match state.votes.set(req.from, vote) {
                     crate::quorum::ElectionState::Won => {
-                        self.role = self.role.to_owned().become_leader()
+                        let last_index = self.storage.store.last_index();
+                        self.role = self.role.to_owned().become_leader(
+                            self.config.cluster_size,
+                            self.id,
+                            last_index,
+                        );
                     }
                     crate::quorum::ElectionState::Lost => {
                         self.role = self.role.to_owned().become_follower()
@@ -421,19 +430,10 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
 
     fn become_leader(&mut self) {
         let last_index = self.storage.store.last_index();
-        // Initialize follower progress for all nodes in the cluster
-        let mut follower_progress = Vec::with_capacity(self.config.cluster_size as usize + 1);
-        // Index 0 is unused (node IDs are 1-indexed)
-        follower_progress.push(FollowerProgress::new(last_index));
-        // Initialize progress for each follower (all nodes except self)
-        for _ in 1..=self.config.cluster_size {
-            follower_progress.push(FollowerProgress::new(last_index));
-        }
-
-        if let Role::Leader(state) = &mut self.role {
-            state.ticks_since_last_heartbeat = 0;
-            state.follower_progress = follower_progress;
-        }
+        self.role =
+            self.role
+                .to_owned()
+                .become_leader(self.config.cluster_size, self.id, last_index);
 
         self.start_term();
         self.leader_id = self.id.into();
@@ -508,21 +508,21 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         }
 
         // Update follower progress
-        let follower_id = resp.from as usize;
-        if follower_id >= self.config.cluster_size as usize + 1 {
-            return Ok(()); // Invalid follower ID
-        }
-
-        if let Role::Leader(ref mut state) = self.role {
-            let progress = &mut state.follower_progress[follower_id];
-            if resp.success {
-                // Update match_index based on what was replicated
-                // For now, we set it to the next_index - 1 since we don't track exact match yet
-                let match_idx = progress.next_index - 1;
-                progress.update_on_success(match_idx);
-            } else {
-                // Decrement next_index to retry with earlier entries
-                progress.decrement_next_index();
+        let follower_id = ValidNodeId::new(resp.from);
+        if let Some(follower_id) = follower_id {
+            if let Role::Leader(ref mut state) = self.role {
+                if state.follower_progress.contains_key(follower_id) {
+                    let progress = &mut state.follower_progress[follower_id];
+                    if resp.success {
+                        // Update match_index based on what was replicated
+                        // For now, we set it to the next_index - 1 since we don't track exact match yet
+                        let match_idx = progress.next_index - 1;
+                        progress.update_on_success(match_idx);
+                    } else {
+                        // Decrement next_index to retry with earlier entries
+                        progress.decrement_next_index();
+                    }
+                }
             }
         }
 
@@ -549,11 +549,12 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
 
     /// Send AppendEntries to a specific follower.
     fn send_append_entries_to(&mut self, to: u64, last_leader_index: u64) {
+        let to_id = ValidNodeId::new(to).unwrap();
         let (_next_index, prev_log_index, prev_log_term, entries) = {
             let Role::Leader(ref state) = self.role else {
                 return;
             };
-            let progress = &state.follower_progress[to as usize];
+            let progress = &state.follower_progress[to_id];
             let next_index = progress.next_index;
             let prev_log_index = if next_index > 1 { next_index - 1 } else { 0 };
             let prev_log_term = if prev_log_index > 0 {
