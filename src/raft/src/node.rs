@@ -1,12 +1,11 @@
-use std::fmt::Display;
-use std::num::NonZeroU64;
-
 use crate::communication::Channel;
+use crate::node_id::{NodeId, ValidNodeId, INVALID_ID};
 use crate::progress::FollowerProgress;
 use crate::quorum::{Quorum, Vote};
 use crate::storage::Storage;
-use crate::{Error, RaftLog};
-use crate::{config::InitialConfig, error::Result};
+use crate::RaftLog;
+use crate::config::InitialConfig;
+use crate::error::Result;
 use proto::proto::*;
 use rand::RngExt;
 use tracing::{debug, error, info};
@@ -35,69 +34,6 @@ pub struct Node<Store: Storage, Chan: Channel> {
     /// set at the start of an election inside the range ([max_election_timeout],
     /// [min_election_timeout])
     pub election_timeout: u64,
-}
-
-/// A (potentially invalid) node id.
-///
-/// `0` is a sentinel value used for messages which are local to a node.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct NodeId(Option<NonZeroU64>);
-
-impl Display for NodeId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            Some(id) => {
-                write!(f, "[{}]", id.get())
-            }
-            None => {
-                write!(f, "invalid node id")
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ValidNodeId(pub NonZeroU64);
-
-impl From<u64> for NodeId {
-    fn from(value: u64) -> NodeId {
-        if value == 0 {
-            NodeId(None)
-        } else {
-            NodeId(Some(NonZeroU64::new(value).unwrap()))
-        }
-    }
-}
-
-impl From<ValidNodeId> for NodeId {
-    fn from(value: ValidNodeId) -> NodeId {
-        NodeId(Some(value.0))
-    }
-}
-
-impl TryFrom<NodeId> for ValidNodeId {
-    type Error = Error;
-
-    fn try_from(value: NodeId) -> Result<Self> {
-        match value.0 {
-            Some(val) => Ok(ValidNodeId(val)),
-            None => Err(Error::InvalidNodeId),
-        }
-    }
-}
-
-pub const INVALID_ID: NodeId = NodeId(None);
-
-impl From<NodeId> for u64 {
-    fn from(value: NodeId) -> Self {
-        value.0.map_or(0, |n| n.get())
-    }
-}
-
-impl From<ValidNodeId> for u64 {
-    fn from(value: ValidNodeId) -> Self {
-        value.0.get()
-    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
