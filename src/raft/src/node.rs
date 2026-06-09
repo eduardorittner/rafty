@@ -2,6 +2,7 @@ use std::fmt::Display;
 use std::num::NonZeroU64;
 
 use crate::communication::Channel;
+use crate::progress::FollowerProgress;
 use crate::quorum::{Quorum, Vote};
 use crate::storage::Storage;
 use crate::{Error, RaftLog};
@@ -177,9 +178,20 @@ impl CandidateState {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LeaderState {
     ticks_since_last_heartbeat: u64,
+    /// Per-follower progress tracking, indexed by node ID (1-indexed, so index 0 is unused).
+    pub follower_progress: Vec<FollowerProgress>,
+}
+
+impl Default for LeaderState {
+    fn default() -> Self {
+        Self {
+            ticks_since_last_heartbeat: 0,
+            follower_progress: Vec::new(),
+        }
+    }
 }
 
 impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
@@ -204,8 +216,12 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         match msg {
             Message::StartCampaign => self.start_campaign(),
             Message::Heartbeat(m) => self.step_heartbeat(m),
-            Message::Append(_) => todo!(),
-            Message::AppendResponse(_) => todo!(),
+            Message::Append(m) => {
+                self.step_append(m)?;
+            }
+            Message::AppendResponse(m) => {
+                self.step_append_response(m)?;
+            }
             Message::RequestVote(m) => self.step_vote_request(m),
             Message::RequestVoteResponse(m) => self.step_vote_response(m),
         }
@@ -236,6 +252,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             }
             Role::Leader(LeaderState {
                 ticks_since_last_heartbeat,
+                ..
             }) => {
                 *ticks_since_last_heartbeat += 1;
                 if *ticks_since_last_heartbeat >= self.config.ticks_between_heartbeats.get() {
@@ -467,8 +484,187 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     }
 
     fn become_leader(&mut self) {
-        self.role = self.role.to_owned().become_leader();
+        let last_index = self.storage.store.last_index();
+        // Initialize follower progress for all nodes in the cluster
+        let mut follower_progress = Vec::with_capacity(self.config.cluster_size as usize + 1);
+        // Index 0 is unused (node IDs are 1-indexed)
+        follower_progress.push(FollowerProgress::new(last_index));
+        // Initialize progress for each follower (all nodes except self)
+        for _ in 1..=self.config.cluster_size {
+            follower_progress.push(FollowerProgress::new(last_index));
+        }
+
+        let mut role = self.role.to_owned().become_leader();
+
+        if let Role::Leader(state) = &mut self.role {
+            state.ticks_since_last_heartbeat = 0;
+            state.follower_progress = follower_progress;
+        }
+
         self.start_term();
         self.leader_id = self.id;
+        info!("Node {:?} became leader at term {}", self.id, self.term);
+
+        // Immediately replicate to all followers
+        self.replicate_to_followers();
+    }
+
+    /// Process incoming AppendEntries RPC as a follower.
+    fn step_append(&mut self, req: Append) -> Result<()> {
+        if req.leader_term > self.term {
+            self.term = req.leader_term;
+            self.voted_for = INVALID_ID;
+            if !matches!(self.role, Role::Follower(_)) {
+                self.role = self.role.to_owned().become_follower();
+            }
+        } else if req.leader_term < self.term {
+            self.send_append_response(false);
+            return Ok(());
+        }
+
+        self.leader_id = req.from.into();
+
+        let log_ok = if req.last_index == 0 {
+            // Leader is sending entries starting from index 1, no prev log check needed
+            true
+        } else {
+            // Check if prev_log_index and prev_log_term match
+            if let Ok(prev_term) = self.storage.store.term(req.last_index) {
+                prev_term == req.last_term
+            } else {
+                false
+            }
+        };
+
+        if !log_ok {
+            debug!(
+                "[{}] log inconsistency: prev_log_index={}, prev_log_term={}, local_term={:?}",
+                self.id,
+                req.last_index,
+                req.last_term,
+                self.storage.store.term(req.last_index)
+            );
+            self.send_append_response(false);
+            return Ok(());
+        }
+
+        // Append entries if any
+        if !req.entries.is_empty() {
+            self.storage.store.append(req.entries)?;
+        }
+
+        self.send_append_response(true);
+        Ok(())
+    }
+
+    /// Handle AppendEntries response as leader.
+    fn step_append_response(&mut self, resp: AppendResponse) -> Result<()> {
+        // Validate term - step down if behind
+        if resp.term > self.term {
+            info!(
+                "[{}] received AppendResponse with higher term {}, becoming follower",
+                self.id, resp.term
+            );
+            self.term = resp.term;
+            self.voted_for = INVALID_ID;
+            self.role = self.role.to_owned().become_follower();
+            return Ok(());
+        } else if resp.term < self.term {
+            return Ok(());
+        }
+
+        // Update follower progress
+        let follower_id = resp.from as usize;
+        if follower_id >= self.config.cluster_size as usize + 1 {
+            return Ok(()); // Invalid follower ID
+        }
+
+        if let Role::Leader(ref mut state) = self.role {
+            let progress = &mut state.follower_progress[follower_id];
+            if resp.success {
+                // Update match_index based on what was replicated
+                // For now, we set it to the next_index - 1 since we don't track exact match yet
+                let match_idx = progress.next_index - 1;
+                progress.update_on_success(match_idx);
+            } else {
+                // Decrement next_index to retry with earlier entries
+                progress.decrement_next_index();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Replicate log entries to all followers.
+    fn replicate_to_followers(&mut self) {
+        if !matches!(self.role, Role::Leader(_)) {
+            return;
+        }
+
+        let last_index = self.storage.store.last_index();
+
+        // Send AppendEntries to each follower
+        for follower_id in 1..=self.config.cluster_size {
+            if follower_id == u64::from(self.id) {
+                continue; // Skip self
+            }
+
+            self.send_append_entries_to(follower_id, last_index);
+        }
+    }
+
+    /// Send AppendEntries to a specific follower.
+    fn send_append_entries_to(&mut self, to: u64, last_leader_index: u64) {
+        let (_next_index, prev_log_index, prev_log_term, entries) = {
+            let Role::Leader(ref state) = self.role else {
+                return;
+            };
+            let progress = &state.follower_progress[to as usize];
+            let next_index = progress.next_index;
+            let prev_log_index = if next_index > 1 { next_index - 1 } else { 0 };
+            let prev_log_term = if prev_log_index > 0 {
+                self.storage.store.term(prev_log_index).unwrap_or(0)
+            } else {
+                0
+            };
+
+            // Get entries to send (from next_index to last_index)
+            let entries = if next_index <= last_leader_index {
+                self.storage
+                    .store
+                    .entries(next_index, last_leader_index + 1)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            (next_index, prev_log_index, prev_log_term, entries)
+        };
+
+        self.channel.send(
+            Message::Append(Append {
+                to,
+                from: self.id.into(),
+                leader_term: self.term,
+                leader_commit: self.storage.committed,
+                last_index: prev_log_index,
+                last_term: prev_log_term,
+                entries,
+            })
+            .into(),
+        );
+    }
+
+    /// Send AppendEntries response to leader.
+    fn send_append_response(&mut self, success: bool) {
+        self.channel.send(
+            Message::AppendResponse(AppendResponse {
+                to: self.leader_id.into(),
+                from: self.id.into(),
+                term: self.term,
+                success,
+            })
+            .into(),
+        );
     }
 }
