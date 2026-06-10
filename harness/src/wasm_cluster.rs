@@ -103,7 +103,9 @@ impl WasmCluster {
                                     msg.term,
                                     timestamp,
                                 );
-                                message_buffer.borrow_mut().push(cluster_msg.clone());
+                                {
+                                    message_buffer.borrow_mut().push(cluster_msg.clone());
+                                }
 
                                 // Notify callbacks
                                 for callback in callback_registry.borrow().iter() {
@@ -127,7 +129,9 @@ impl WasmCluster {
                             timestamp,
                         );
 
-                        message_buffer.borrow_mut().push(cluster_msg.clone());
+                        {
+                            message_buffer.borrow_mut().push(cluster_msg.clone());
+                        }
 
                         // Notify callbacks
                         for callback in callback_registry.borrow().iter() {
@@ -149,10 +153,11 @@ impl WasmCluster {
 
     /// Starts the cluster simulation
     pub fn start(&self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.is_running = true;
-        let rate_ms = inner.cluster.tick_rate_ms;
-        drop(inner);
+        let rate_ms = {
+            let mut inner = self.inner.borrow_mut();
+            inner.is_running = true;
+            inner.cluster.tick_rate_ms
+        };
 
         // Start the timer to automatically tick the cluster
         if let Some(window) = window() {
@@ -181,8 +186,10 @@ impl WasmCluster {
 
     /// Stops the cluster simulation
     pub fn stop(&self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.is_running = false;
+        {
+            let mut inner = self.inner.borrow_mut();
+            inner.is_running = false;
+        }
 
         // Clear timer if any
         let timer_id = *self.timer_id.borrow();
@@ -228,14 +235,12 @@ impl WasmCluster {
 
     /// Sets the tick interval in milliseconds
     pub fn set_tick_rate(&self, rate_ms: u64) {
-        // Get the running state first, then release the borrow
         let needs_restart = {
             let mut inner = self.inner.borrow_mut();
             inner.cluster.tick_rate_ms = rate_ms;
             inner.is_running
-        }; // Borrow is dropped here
+        };
 
-        // Restart timer if running
         if needs_restart {
             self.stop();
             self.start_with_timer();
@@ -262,7 +267,7 @@ impl WasmCluster {
         {
             let mut inner = self.inner.borrow_mut();
             inner.cluster.resume_node(node_id);
-        } // Drop the borrow before calling notify_state_change
+        }
         self.notify_state_change();
     }
 
@@ -362,12 +367,14 @@ impl WasmCluster {
     /// Resets cluster to initial state
     pub fn reset(&self) {
         self.stop();
-        let mut inner = self.inner.borrow_mut();
-        let new_cluster = Cluster::from_config(
-            Cluster::initial_config(inner.cluster.nodes.len() as u64),
-            crate::FaultRate(100),
-        );
-        inner.cluster = new_cluster;
+        {
+            let mut inner = self.inner.borrow_mut();
+            let new_cluster = Cluster::from_config(
+                Cluster::initial_config(inner.cluster.nodes.len() as u64),
+                crate::FaultRate(100),
+            );
+            inner.cluster = new_cluster;
+        }
         self.message_buffer.borrow_mut().clear();
         self.notify_state_change();
     }
