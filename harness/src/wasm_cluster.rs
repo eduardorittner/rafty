@@ -15,6 +15,7 @@ use proto::proto::ProtoMessageType;
 struct ClusterInternal {
     cluster: Cluster,
     is_running: bool,
+    is_paused: bool,
 }
 
 impl ClusterInternal {
@@ -29,6 +30,7 @@ impl ClusterInternal {
         Self {
             cluster,
             is_running: false,
+            is_paused: false,
         }
     }
 }
@@ -192,7 +194,33 @@ impl WasmCluster {
     /// Performs a single tick across all nodes
     pub fn tick(&self) {
         let mut inner = self.inner.borrow_mut();
-        inner.cluster.tick_active();
+        if !inner.is_paused {
+            inner.cluster.tick_active();
+        }
+    }
+
+    /// Pauses the entire cluster (no new messages sent, but existing messages are preserved)
+    pub fn pause_cluster(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.is_paused = true;
+    }
+
+    /// Resumes the cluster
+    pub fn resume_cluster(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.is_paused = false;
+    }
+
+    /// Toggles cluster paused state
+    pub fn toggle_cluster_paused(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.is_paused = !inner.is_paused;
+    }
+
+    /// Gets cluster paused state
+    pub fn is_cluster_paused(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.is_paused
     }
 
     /// Sets the tick interval in milliseconds

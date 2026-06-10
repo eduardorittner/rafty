@@ -179,6 +179,25 @@ function restartCluster() {
 	}
 }
 
+function toggleClusterPause() {
+	if (cluster) {
+		cluster.toggle_cluster_paused();
+		const btn = document.getElementById('pause-cluster-btn');
+		const isPaused = cluster.is_cluster_paused();
+		if (isPaused) {
+			btn.textContent = 'Resume Cluster';
+			btn.style.background = 'rgba(16, 185, 129, 0.1)';
+			btn.style.borderColor = 'rgba(16, 185, 129, 0.2)';
+			btn.style.color = '#10b981';
+		} else {
+			btn.textContent = 'Pause Cluster';
+			btn.style.background = 'rgba(59, 130, 246, 0.1)';
+			btn.style.borderColor = 'rgba(59, 130, 246, 0.2)';
+			btn.style.color = '#60a5fa';
+		}
+	}
+}
+
 function renderUI(data) {
 	if (!data || !data.nodes) return;
 
@@ -419,6 +438,7 @@ window.toggleNode = toggleNode;
 window.changeTickRate = changeTickRate;
 window.restartCluster = restartCluster;
 window.toggleMessageLog = toggleMessageLog;
+window.toggleClusterPause = toggleClusterPause;
 
 // Start the app
 initApp();
