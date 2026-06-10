@@ -7,7 +7,8 @@
 	<title>Raft Rafty Cluster Dashboard - WASM</title>
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-	<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+	<link
+		href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
 		rel="stylesheet">
 	<style>
 		* {
@@ -33,8 +34,8 @@
 			backdrop-filter: blur(12px);
 			border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 			display: flex;
-			justify-content: space-between;
 			align-items: center;
+			gap: 20px;
 			position: sticky;
 			top: 0;
 			z-index: 10;
@@ -85,21 +86,27 @@
 			}
 		}
 
-	main {
-		display: flex;
-		flex-grow: 1;
-		height: calc(100vh - 73px);
-		overflow: hidden;
-	}
+		main {
+			display: flex;
+			flex-grow: 1;
+			height: calc(100vh - 73px);
+			overflow: hidden;
+			position: relative;
+		}
 
-	#cluster-view {
-		display: grid;
-		grid-template-columns: 1fr 400px;
-		width: 100%;
-		height: 100%;
-	}
+		#cluster-view {
+			display: grid;
+			grid-template-columns: 1fr 400px;
+			width: 100%;
+			height: 100%;
+			position: absolute;
+			left: 0;
+			right: 0;
+			top: 0;
+			bottom: 0;
+		}
 
-	.visualizer-pane {
+		.visualizer-pane {
 			position: relative;
 			background: radial-gradient(circle at 50% 50%, #16162a 0%, #0b0b14 100%);
 			display: flex;
@@ -433,8 +440,15 @@
 		/* Log View Styles */
 		#log-view {
 			background: rgba(10, 10, 20, 0.8);
-			display: flex;
+			display: none;
 			flex-direction: column;
+			height: 100%;
+			width: 100%;
+			position: absolute;
+			left: 0;
+			right: 0;
+			top: 0;
+			bottom: 0;
 		}
 
 		.log-view-header {
@@ -622,6 +636,43 @@
 			font-size: 14px;
 			color: #94a3b8;
 		}
+
+		/* Write Entry Sidebar */
+		.write-entry-sidebar {
+			width: 280px;
+			flex-shrink: 0;
+			background: rgba(15, 15, 27, 0.9);
+			border-right: 1px solid rgba(255, 255, 255, 0.05);
+			padding: 25px 30px;
+			overflow-y: auto;
+		}
+
+		.write-entry-sidebar input {
+			user-select: text !important;
+		}
+
+		.write-entry-sidebar input:focus {
+			border-color: rgba(99, 102, 241, 0.5);
+			box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+		}
+
+		#submit-entry-btn:hover {
+			background: linear-gradient(135deg, rgba(99, 102, 241, 0.3) 0%, rgba(168, 85, 247, 0.3) 100%);
+			border-color: rgba(99, 102, 241, 0.6);
+			transform: translateY(-1px);
+		}
+
+		#submit-entry-btn:active {
+			transform: translateY(0);
+		}
+
+		#submit-status.success {
+			color: #34d399;
+		}
+
+		#submit-status.error {
+			color: #f87171;
+		}
 	</style>
 </head>
 
@@ -629,17 +680,34 @@
 	<header>
 		<div class="logo">
 			<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-				<path d="M12 2L2 22H22L12 2Z" stroke="url(#logo-grad)" stroke-width="2"
-					stroke-linejoin="round" />
+				<path d="M12 2L2 22H22L12 2Z" stroke="url(#logo-grad)" stroke-width="2" stroke-linejoin="round" />
 				<defs>
-					<linearGradient id="logo-grad" x1="2" y1="2" x2="22" y2="22"
-						gradientUnits="userSpaceOnUse">
+					<linearGradient id="logo-grad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
 						<stop stop-color="#6366f1" />
 						<stop offset="1" stop-color="#a855f7" />
 					</linearGradient>
 				</defs>
 			</svg>
 			Rafty Raft Cluster (WASM)
+		</div>
+		<!-- View Toggle Buttons - in header for always-visible access -->
+		<div class="view-toggle-buttons">
+			<button class="view-toggle-btn active" id="btn-cluster-view" onclick="toggleView('cluster')">
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<circle cx="12" cy="12" r="3" />
+					<circle cx="12" cy="12" r="8" stroke-dasharray="4 2" />
+				</svg>
+				Cluster View
+			</button>
+			<button class="view-toggle-btn" id="btn-log-view" onclick="toggleView('logs')">
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+					<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+					<polyline points="14 2 14 8 20 8" />
+					<line x1="16" y1="13" x2="8" y2="13" />
+					<line x1="16" y1="17" x2="8" y2="17" />
+				</svg>
+				Log View
+			</button>
 		</div>
 		<div class="status-container">
 			<div class="pulse"></div>
@@ -651,102 +719,80 @@
 		<!-- Cluster View Container -->
 		<div id="cluster-view">
 			<div class="visualizer-pane">
-			<svg id="svg-canvas" viewBox="0 0 600 600">
-				<!-- Lines will be drawn first so they sit below nodes -->
-				<g id="connections-group"></g>
-				<!-- Animating Packets Group -->
-				<g id="packets-group"></g>
-				<!-- Nodes Group -->
-				<g id="nodes-group"></g>
-			</svg>
-		</div>
-
-		<div class="sidebar">
-			<!-- View Toggle Buttons -->
-			<div class="view-toggle-buttons" style="margin-bottom: 20px;">
-				<button class="view-toggle-btn active" id="btn-cluster-view" onclick="toggleView('cluster')">
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<circle cx="12" cy="12" r="3"/>
-						<circle cx="12" cy="12" r="8" stroke-dasharray="4 2"/>
-					</svg>
-					Cluster View
-				</button>
-				<button class="view-toggle-btn" id="btn-log-view" onclick="toggleView('logs')">
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-						<polyline points="14 2 14 8 20 8"/>
-						<line x1="16" y1="13" x2="8" y2="13"/>
-						<line x1="16" y1="17" x2="8" y2="17"/>
-					</svg>
-					Log View
-				</button>
+				<svg id="svg-canvas" viewBox="0 0 600 600">
+					<!-- Lines will be drawn first so they sit below nodes -->
+					<g id="connections-group"></g>
+					<!-- Animating Packets Group -->
+					<g id="packets-group"></g>
+					<!-- Nodes Group -->
+					<g id="nodes-group"></g>
+				</svg>
 			</div>
 
-			<!-- Dynamic Simulation Speed Controller & Reset Button -->
-			<div
-				style="background: rgba(30, 30, 50, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 20px;">
-				<h3 class="pane-title" style="margin-bottom: 15px;">Cluster Tuning</h3>
-				<div style="display: flex; flex-direction: column; gap: 10px;">
-					<div
-						style="display: flex; justify-content: space-between; font-size: 14px; color: #94a3b8;">
-						<span>Simulation Tick Rate</span>
-						<span><span id="tick-rate-val">100</span>ms</span>
-					</div>
-					<input type="range" id="tick-rate-slider" min="50" max="1000" step="50"
-						value="100"
-						style="width: 100%; accent-color: #6366f1; cursor: pointer; background: #1e1e32; border-radius: 6px; height: 6px; appearance: none; outline: none;">
-					<div
-						style="display: flex; justify-content: space-between; font-size: 10px; color: #64748b; font-family: 'JetBrains Mono', monospace;">
-						<span>Fast (50ms)</span>
-						<span>Slow (1000ms)</span>
-					</div>
+			<div class="sidebar">
+				<!-- Dynamic Simulation Speed Controller & Reset Button -->
+				<div
+					style="background: rgba(30, 30, 50, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 20px;">
+					<h3 class="pane-title" style="margin-bottom: 15px;">Cluster Tuning</h3>
+					<div style="display: flex; flex-direction: column; gap: 10px;">
+						<div style="display: flex; justify-content: space-between; font-size: 14px; color: #94a3b8;">
+							<span>Simulation Tick Rate</span>
+							<span><span id="tick-rate-val">100</span>ms</span>
+						</div>
+						<input type="range" id="tick-rate-slider" min="50" max="1000" step="50" value="100"
+							style="width: 100%; accent-color: #6366f1; cursor: pointer; background: #1e1e32; border-radius: 6px; height: 6px; appearance: none; outline: none;">
+						<div
+							style="display: flex; justify-content: space-between; font-size: 10px; color: #64748b; font-family: 'JetBrains Mono', monospace;">
+							<span>Fast (50ms)</span>
+							<span>Slow (1000ms)</span>
+						</div>
 
-					<button class="btn-toggle btn-kill"
-						style="width: 100%; margin-top: 15px; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.2); color: #ef4444;"
-						onclick="restartCluster()">
-						Restart Cluster from Scratch
-					</button>
-					<button class="btn-toggle" id="pause-cluster-btn"
-						style="width: 100%; margin-top: 10px; background: rgba(59, 130, 246, 0.1); border-color: rgba(59, 130, 246, 0.2); color: #60a5fa;"
-						onclick="toggleClusterPause()">
-						Pause Cluster
-					</button>
-				</div>
-			</div>
-
-			<!-- Message Trace Log Panel (Collapsible, default hidden) -->
-			<div class="event-log-container"
-				style="background: rgba(30, 30, 50, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 15px; max-height: none; flex-grow: 0;">
-				<h3 class="pane-title" onclick="toggleMessageLog()"
-					style="cursor: pointer; display: flex; align-items: center; justify-content: space-between; width: 100%; user-select: none;">
-					<span style="display: flex; align-items: center; gap: 8px;">
-						<span id="log-toggle-arrow"
-							style="display: inline-block; transition: transform 0.2s; transform: rotate(-90deg);">&#9662;</span>
-						Message Trace Log
-					</span>
-					<span id="log-status-badge"
-						style="font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; text-transform: uppercase; background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); transition: all 0.2s;">Disabled</span>
-				</h3>
-				<div id="event-log-body" style="display: none; flex-direction: column; gap: 15px;">
-					<div style="font-size:12px; font-weight:normal; color:#64748b;">showing last 50
-					</div>
-					<div class="event-log" id="event-log-container"
-						style="height: 180px; max-height: 180px;">
-						<!-- Dynamic Event Logs -->
+						<button class="btn-toggle btn-kill"
+							style="width: 100%; margin-top: 15px; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.2); color: #ef4444;"
+							onclick="restartCluster()">
+							Restart Cluster from Scratch
+						</button>
+						<button class="btn-toggle" id="pause-cluster-btn"
+							style="width: 100%; margin-top: 10px; background: rgba(59, 130, 246, 0.1); border-color: rgba(59, 130, 246, 0.2); color: #60a5fa;"
+							onclick="toggleClusterPause()">
+							Pause Cluster
+						</button>
 					</div>
 				</div>
-			</div>
 
-			<div>
-				<h3 class="pane-title" style="margin-bottom: 20px;">Cluster Nodes</h3>
-				<div class="node-list" id="node-list-container">
-					<!-- Dynamic Node Cards -->
+				<!-- Message Trace Log Panel (Collapsible, default hidden) -->
+				<div class="event-log-container"
+					style="background: rgba(30, 30, 50, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 15px; max-height: none; flex-grow: 0;">
+					<h3 class="pane-title" onclick="toggleMessageLog()"
+						style="cursor: pointer; display: flex; align-items: center; justify-content: space-between; width: 100%; user-select: none;">
+						<span style="display: flex; align-items: center; gap: 8px;">
+							<span id="log-toggle-arrow"
+								style="display: inline-block; transition: transform 0.2s; transform: rotate(-90deg);">&#9662;</span>
+							Message Trace Log
+						</span>
+						<span id="log-status-badge"
+							style="font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; text-transform: uppercase; background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); transition: all 0.2s;">Disabled</span>
+					</h3>
+					<div id="event-log-body" style="display: none; flex-direction: column; gap: 15px;">
+						<div style="font-size:12px; font-weight:normal; color:#64748b;">showing last 50
+						</div>
+						<div class="event-log" id="event-log-container" style="height: 180px; max-height: 180px;">
+							<!-- Dynamic Event Logs -->
+						</div>
+					</div>
+				</div>
+
+				<div>
+					<h3 class="pane-title" style="margin-bottom: 20px;">Cluster Nodes</h3>
+					<div class="node-list" id="node-list-container">
+						<!-- Dynamic Node Cards -->
+					</div>
 				</div>
 			</div>
 		</div>
 
 		<!-- Log View Container -->
-		<div id="log-view" style="display: none; width: 100%; height: 100%; overflow: hidden;">
+		<div id="log-view">
 			<!-- Node selector bar -->
 			<div class="log-view-header">
 				<div class="log-view-title">Raft Log Entries</div>
@@ -757,9 +803,53 @@
 					</div>
 				</div>
 			</div>
-			<!-- Log entries container -->
-			<div class="log-entries-container" id="log-entries-container">
-				<!-- Log entries will be rendered here -->
+			<!-- Log view content with sidebar -->
+			<div style="display: flex; flex: 1; overflow: hidden;">
+				<!-- Write Entry Sidebar -->
+				<div class="write-entry-sidebar">
+					<h3 class="pane-title" style="margin-bottom: 20px; display: flex; align-items: center; gap: 8px;">
+						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+							stroke-width="2">
+							<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+							<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+						</svg>
+						Write Entry
+					</h3>
+					<div style="display: flex; flex-direction: column; gap: 15px;">
+						<div>
+							<label
+								style="display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; font-weight: 500;">Key</label>
+							<input type="text" id="entry-key-input" placeholder="e.g., username"
+								style="width: 100%; padding: 10px 12px; background: rgba(30, 30, 50, 0.5); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; font-size: 13px; outline: none; transition: border-color 0.2s;" />
+						</div>
+						<div>
+							<label
+								style="display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; font-weight: 500;">Value</label>
+							<input type="text" id="entry-value-input" placeholder="e.g., alice"
+								style="width: 100%; padding: 10px 12px; background: rgba(30, 30, 50, 0.5); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; font-size: 13px; outline: none; transition: border-color 0.2s;" />
+						</div>
+						<button id="submit-entry-btn"
+							style="width: 100%; padding: 12px; background: linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(168, 85, 247, 0.2) 100%); border: 1px solid rgba(99, 102, 241, 0.4); border-radius: 8px; color: #818cf8; font-weight: 600; font-size: 14px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px;">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+								stroke-width="2">
+								<polyline points="20 6 9 17 4 12" />
+							</svg>
+							Submit to Leader
+						</button>
+						<div id="submit-status"
+							style="font-size: 12px; text-align: center; min-height: 18px; transition: all 0.2s;"></div>
+					</div>
+					<div style="margin-top: 25px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.05);">
+						<p style="font-size: 11px; color: #64748b; line-height: 1.6;">
+							Entries are sent to the current leader and replicated across the cluster. Committed entries
+							will appear in all nodes' logs.
+						</p>
+					</div>
+				</div>
+				<!-- Log entries container -->
+				<div class="log-entries-container" id="log-entries-container" style="flex: 1; overflow-y: auto;">
+					<!-- Log entries will be rendered here -->
+				</div>
 			</div>
 		</div>
 	</main>

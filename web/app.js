@@ -445,24 +445,34 @@ async function initApp() {
  * Toggle between cluster view and log view
  */
 function toggleView(viewName) {
-	currentView = viewName;
-	
-	const clusterView = document.getElementById('cluster-view');
-	const logView = document.getElementById('log-view');
-	const btnCluster = document.getElementById('btn-cluster-view');
-	const btnLog = document.getElementById('btn-log-view');
-	
-	if (viewName === 'cluster') {
-		clusterView.style.display = 'grid';
-		logView.style.display = 'none';
-		btnCluster.classList.add('active');
-		btnLog.classList.remove('active');
-	} else if (viewName === 'logs') {
-		clusterView.style.display = 'none';
-		logView.style.display = 'block';
-		btnLog.classList.add('active');
-		btnCluster.classList.remove('active');
-		renderLogView();
+	try {
+		currentView = viewName;
+		
+		const clusterView = document.getElementById('cluster-view');
+		const logView = document.getElementById('log-view');
+		const btnCluster = document.getElementById('btn-cluster-view');
+		const btnLog = document.getElementById('btn-log-view');
+		
+		console.log('Toggling view to:', viewName, 'clusterView:', clusterView, 'logView:', logView);
+		
+		if (viewName === 'cluster') {
+			if (clusterView) clusterView.style.display = 'grid';
+			if (logView) logView.style.display = 'none';
+			if (btnCluster) btnCluster.classList.add('active');
+			if (btnLog) btnLog.classList.remove('active');
+			console.log('Cluster view: display=grid');
+		} else if (viewName === 'logs') {
+			if (clusterView) clusterView.style.display = 'none';
+			if (logView) {
+				logView.style.display = 'flex';
+				console.log('Log view: display=flex, computed style:', window.getComputedStyle(logView).display);
+			}
+			if (btnLog) btnLog.classList.add('active');
+			if (btnCluster) btnCluster.classList.remove('active');
+			renderLogView();
+		}
+	} catch (error) {
+		console.error('Error toggling view:', error);
 	}
 }
 
@@ -580,5 +590,93 @@ window.toggleClusterPause = toggleClusterPause;
 window.toggleView = toggleView;
 window.selectNodeInLogView = selectNodeInLogView;
 
+// ==================== WRITE ENTRY FUNCTIONS ====================
+
+/**
+ * Submit a key-value entry to the cluster leader
+ */
+function submitEntry() {
+    const keyInput = document.getElementById('entry-key-input');
+    const valueInput = document.getElementById('entry-value-input');
+    const statusEl = document.getElementById('submit-status');
+    
+    const key = keyInput.value.trim();
+    const value = valueInput.value.trim();
+    
+    if (!key) {
+        statusEl.textContent = 'Please enter a key';
+        statusEl.className = 'error';
+        return;
+    }
+    
+    if (!value) {
+        statusEl.textContent = 'Please enter a value';
+        statusEl.className = 'error';
+        return;
+    }
+    
+    if (!cluster) {
+        statusEl.textContent = 'Cluster not initialized';
+        statusEl.className = 'error';
+        return;
+    }
+    
+    // Submit to the cluster
+    const success = cluster.submit_entry(key, value);
+    
+    if (success) {
+        statusEl.textContent = 'Entry submitted successfully!';
+        statusEl.className = 'success';
+        // Clear inputs
+        keyInput.value = '';
+        valueInput.value = '';
+        // Refresh log view if visible
+        if (currentView === 'logs') {
+            updateLogView();
+        }
+    } else {
+        statusEl.textContent = 'No leader found. Wait for election.';
+        statusEl.className = 'error';
+    }
+    
+    // Clear status after 3 seconds
+    setTimeout(() => {
+        statusEl.textContent = '';
+        statusEl.className = '';
+    }, 3000);
+}
+
+// Setup submit entry button handler
+function setupSubmitEntryHandler() {
+    const submitBtn = document.getElementById('submit-entry-btn');
+    const keyInput = document.getElementById('entry-key-input');
+    const valueInput = document.getElementById('entry-value-input');
+    
+    if (submitBtn) {
+        submitBtn.addEventListener('click', submitEntry);
+    }
+    
+    // Allow Enter key to submit
+    if (keyInput && valueInput) {
+        keyInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                valueInput.focus();
+            }
+        });
+        
+        valueInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                submitEntry();
+            }
+        });
+    }
+}
+
+// Make submitEntry available globally
+window.submitEntry = submitEntry;
+
 // Start the app
-initApp();
+initApp().then(() => {
+    // Setup submit entry handler after initialization
+    setupSubmitEntryHandler();
+});

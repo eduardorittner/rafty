@@ -9,7 +9,7 @@ use web_sys::window;
 use crate::Cluster;
 use crate::wasm_types::{ClusterMessage, NodeState, RaftLogEntry};
 use proto::proto::ProtoMessageType;
-use raft::{Role, Storage};
+use raft::{Channel, Role, Storage};
 
 /// Internal cluster state tracker
 struct ClusterInternal {
@@ -424,6 +424,96 @@ impl WasmCluster {
         }
 
         serde_wasm_bindgen::to_value(&entries).unwrap_or(JsValue::NULL)
+    }
+
+    /// Submits a key-value entry to the leader for replication
+    /// Returns true if successful, false if no leader found
+    pub fn submit_entry(&self, key: &str, value: &str) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let cluster = &mut inner.cluster;
+
+        // Find the leader node
+        let leader = cluster.nodes.iter_mut().find(|n| {
+            matches!(n.role, raft::Role::Leader(_)) && !cluster.paused_nodes.contains(&u64::from(n.id))
+        });
+
+        if leader.is_none() {
+            return false;
+        }
+
+        let leader = leader.unwrap();
+        let leader_id = u64::from(leader.id);
+
+        // Create the entry data as "key:value" format
+        let entry_data = format!("{}:{}", key, value);
+
+        // Get the next log index
+        let last_index = leader.storage.store.last_index();
+        let next_index = last_index + 1;
+
+        // Create the entry
+        use proto::proto::Entry;
+        let entry = Entry {
+            term: leader.term,
+            index: next_index,
+            data: entry_data.into_bytes(),
+        };
+
+        // Append to leader's storage
+        let result = leader.storage.store.append(vec![entry]);
+        if result.is_err() {
+            return false;
+        }
+
+        // Trigger immediate replication by calling replicate_to_followers logic
+        // Send AppendEntries to each follower
+        for follower_id in 1..=cluster.nodes.len() as u64 {
+            if follower_id == leader_id {
+                continue; // Skip self
+            }
+            Self::send_append_entries_manual(cluster, leader_id, follower_id);
+        }
+
+        true
+    }
+}
+
+impl WasmCluster {
+    /// Manual AppendEntries sending for immediate replication after submit_entry
+    fn send_append_entries_manual(cluster: &mut Cluster, leader_id: u64, to: u64) {
+        use proto::proto::{Append, Entry, Message};
+
+        let leader = cluster.get_mut(leader_id);
+        if !matches!(leader.role, raft::Role::Leader(_)) {
+            return;
+        }
+
+        let last_index = leader.storage.store.last_index();
+        let prev_log_index = if last_index > 0 { last_index - 1 } else { 0 };
+        let prev_log_term = if prev_log_index > 0 {
+            leader.storage.store.term(prev_log_index).unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Get the entry to send (the last one we just appended)
+        let entries = if last_index > 0 {
+            leader.storage.store.entries(last_index, last_index + 1).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let append_msg = Message::Append(Append {
+            to,
+            from: leader_id.into(),
+            leader_term: leader.term,
+            leader_commit: leader.storage.committed,
+            last_index: prev_log_index,
+            last_term: prev_log_term,
+            entries,
+        });
+
+        leader.channel.send(append_msg.into());
     }
 }
 
