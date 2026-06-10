@@ -402,7 +402,7 @@ async function initApp() {
 	try {
 		// Initialize WASM module with explicit path to WASM binary
 		// Vite serves files outside root via /@fs/ prefix
-		await init('/@fs/home/erittner/personal/rafty/harness/pkg/rafty_wasm_bg.wasm');
+		await init();
 		
 		// Create cluster with 5 nodes and 0% drop rate (cluster_size must be BigInt)
 		cluster = new WasmCluster(BigInt(5), 0);
