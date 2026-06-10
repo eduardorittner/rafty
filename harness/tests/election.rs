@@ -263,10 +263,10 @@ fn stale_leader_steps_down() {
 
     // Leader steps on the response containing higher term
     let response_msg: proto::proto::Message = response.into();
-    if let proto::proto::Message::Heartbeat(ref hb) = response_msg {
+    if let proto::proto::Message::HeartbeatResponse(ref hb) = response_msg {
         assert_eq!(hb.term, 2);
     } else {
-        panic!("Expected Heartbeat message");
+        panic!("Expected HeartbeatResponse message");
     }
 
     cluster.nodes[0].step(response_msg).unwrap();
