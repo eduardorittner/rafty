@@ -13,10 +13,20 @@ use crate::{FaultRate, FaultyChannel, MemStorage, NO_FAULT, TestChannel, TestNod
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub enum ClusterEvent {
-    NodeStateChanged { node_id: u64 },
-    MessageSent { from: u64, to: u64, msg_type: String },
-    NodePaused { node_id: u64 },
-    NodeResumed { node_id: u64 },
+    NodeStateChanged {
+        node_id: u64,
+    },
+    MessageSent {
+        from: u64,
+        to: u64,
+        msg_type: String,
+    },
+    NodePaused {
+        node_id: u64,
+    },
+    NodeResumed {
+        node_id: u64,
+    },
 }
 
 /// Serializable message for visualization (non-WASM stub)
@@ -33,7 +43,13 @@ pub struct ClusterMessage {
 #[cfg(not(target_arch = "wasm32"))]
 impl ClusterMessage {
     pub fn new(from: u64, to: u64, msg_type: String, term: u64, timestamp: u64) -> Self {
-        Self { from, to, msg_type, term, timestamp }
+        Self {
+            from,
+            to,
+            msg_type,
+            term,
+            timestamp,
+        }
     }
 }
 
@@ -99,7 +115,7 @@ impl Cluster {
             paused_nodes: HashSet::new(),
             message_buffer: Vec::new(),
             state_callbacks: Vec::new(),
-            tick_rate_ms: 100, // Default 100ms tick rate
+            tick_rate_ms: 500,
         }
     }
 
@@ -107,8 +123,8 @@ impl Cluster {
         InitialConfig {
             id: ValidNodeId(NonZeroU64::new(1).unwrap()),
             cluster_size: size,
-            min_ticks_before_election: NonZeroU64::new(10).unwrap(),
-            max_ticks_before_election: NonZeroU64::new(20).unwrap(),
+            min_ticks_before_election: NonZeroU64::new(6).unwrap(),
+            max_ticks_before_election: NonZeroU64::new(12).unwrap(),
             ticks_between_heartbeats: NonZeroU64::new(1).unwrap(),
             last_applied_idx: None,
         }
@@ -199,7 +215,7 @@ impl Cluster {
                 node.tick();
             }
         }
-        
+
         // Then, step all active nodes to process incoming messages
         for node in &mut self.nodes {
             if !self.paused_nodes.contains(&u64::from(node.id)) {
@@ -254,12 +270,18 @@ impl Cluster {
         #[cfg(target_arch = "wasm32")]
         {
             self.message_buffer.push(msg.clone());
-            self.emit_event(ClusterEvent::MessageSent { message: msg.clone() });
+            self.emit_event(ClusterEvent::MessageSent {
+                message: msg.clone(),
+            });
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.message_buffer.push(msg.clone());
-            self.emit_event(ClusterEvent::MessageSent { from: msg.from, to: msg.to, msg_type: msg.msg_type });
+            self.emit_event(ClusterEvent::MessageSent {
+                from: msg.from,
+                to: msg.to,
+                msg_type: msg.msg_type,
+            });
         }
     }
 
