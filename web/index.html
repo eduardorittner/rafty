@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Raft Rafty Cluster Dashboard - WASM</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+		rel="stylesheet">
+	<style>
+		* {
+			box-sizing: border-box;
+			margin: 0;
+			padding: 0;
+			user-select: none;
+		}
+
+		body {
+			background-color: #0b0b14;
+			color: #e2e8f0;
+			font-family: 'Outfit', sans-serif;
+			overflow-x: hidden;
+			display: flex;
+			flex-direction: column;
+			min-height: 100vh;
+		}
+
+		header {
+			padding: 20px 40px;
+			background: rgba(15, 15, 27, 0.75);
+			backdrop-filter: blur(12px);
+			border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			position: sticky;
+			top: 0;
+			z-index: 10;
+		}
+
+		.logo {
+			font-size: 24px;
+			font-weight: 700;
+			background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+			-webkit-background-clip: text;
+			-webkit-text-fill-color: transparent;
+			display: flex;
+			align-items: center;
+			gap: 10px;
+		}
+
+		.status-container {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			font-size: 14px;
+			color: #94a3b8;
+		}
+
+		.pulse {
+			width: 8px;
+			height: 8px;
+			background-color: #10b981;
+			border-radius: 50%;
+			box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+			animation: pulse-animation 1.5s infinite;
+		}
+
+		@keyframes pulse-animation {
+			0% {
+				transform: scale(0.95);
+				box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+			}
+
+			70% {
+				transform: scale(1);
+				box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
+			}
+
+			100% {
+				transform: scale(0.95);
+				box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+			}
+		}
+
+		main {
+			display: grid;
+			grid-template-columns: 1fr 400px;
+			flex-grow: 1;
+			height: calc(100vh - 73px);
+			overflow: hidden;
+		}
+
+		.visualizer-pane {
+			position: relative;
+			background: radial-gradient(circle at 50% 50%, #16162a 0%, #0b0b14 100%);
+			display: flex;
+			justify-content: center;
+			align-items: center;
+			overflow: hidden;
+		}
+
+		.sidebar {
+			background: rgba(15, 15, 27, 0.9);
+			border-left: 1px solid rgba(255, 255, 255, 0.05);
+			display: flex;
+			flex-direction: column;
+			overflow-y: auto;
+			padding: 30px;
+			gap: 30px;
+		}
+
+		.pane-title {
+			font-size: 18px;
+			font-weight: 600;
+			color: #f8fafc;
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+		}
+
+		.node-list {
+			display: flex;
+			flex-direction: column;
+			gap: 15px;
+		}
+
+		.node-card {
+			background: rgba(30, 30, 50, 0.4);
+			border: 1px solid rgba(255, 255, 255, 0.05);
+			border-radius: 12px;
+			padding: 16px;
+			transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+		}
+
+		.node-card:hover {
+			transform: translateY(-2px);
+			border-color: rgba(99, 102, 241, 0.4);
+			box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
+		}
+
+		.node-card-info {
+			display: flex;
+			flex-direction: column;
+			gap: 4px;
+		}
+
+		.node-card-id {
+			font-size: 16px;
+			font-weight: 600;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+		}
+
+		.node-card-role {
+			font-size: 12px;
+			padding: 2px 8px;
+			border-radius: 99px;
+			font-weight: 500;
+			text-transform: uppercase;
+		}
+
+		.role-follower {
+			background: rgba(59, 130, 246, 0.15);
+			color: #60a5fa;
+			border: 1px solid rgba(59, 130, 246, 0.3);
+		}
+
+		.role-candidate {
+			background: rgba(245, 158, 11, 0.15);
+			color: #fbbf24;
+			border: 1px solid rgba(245, 158, 11, 0.3);
+		}
+
+		.role-leader {
+			background: rgba(16, 185, 129, 0.15);
+			color: #34d399;
+			border: 1px solid rgba(16, 185, 129, 0.3);
+		}
+
+		.role-offline {
+			background: rgba(239, 68, 68, 0.15);
+			color: #f87171;
+			border: 1px solid rgba(239, 68, 68, 0.3);
+		}
+
+		.node-card-details {
+			font-size: 13px;
+			color: #94a3b8;
+		}
+
+		.node-card-details span {
+			font-family: 'JetBrains Mono', monospace;
+			color: #cbd5e1;
+		}
+
+		.btn-toggle {
+			cursor: pointer;
+			border: none;
+			padding: 8px 16px;
+			border-radius: 8px;
+			font-weight: 600;
+			font-size: 13px;
+			transition: all 0.2s;
+			font-family: 'Outfit', sans-serif;
+		}
+
+		.btn-kill {
+			background: rgba(239, 68, 68, 0.1);
+			color: #ef4444;
+			border: 1px solid rgba(239, 68, 68, 0.2);
+		}
+
+		.btn-kill:hover {
+			background: #ef4444;
+			color: #ffffff;
+		}
+
+		.btn-recover {
+			background: rgba(16, 185, 129, 0.1);
+			color: #10b981;
+			border: 1px solid rgba(16, 185, 129, 0.2);
+		}
+
+		.btn-recover:hover {
+			background: #10b981;
+			color: #ffffff;
+		}
+
+		.event-log-container {
+			flex-grow: 1;
+			display: flex;
+			flex-direction: column;
+			gap: 15px;
+			max-height: 300px;
+		}
+
+		.event-log {
+			background: rgba(10, 10, 20, 0.5);
+			border: 1px solid rgba(255, 255, 255, 0.05);
+			border-radius: 12px;
+			flex-grow: 1;
+			overflow-y: auto;
+			padding: 15px;
+			display: flex;
+			flex-direction: column;
+			gap: 10px;
+			font-family: 'JetBrains Mono', monospace;
+			font-size: 11px;
+		}
+
+		.event-row {
+			padding: 6px 10px;
+			border-radius: 6px;
+			background: rgba(255, 255, 255, 0.02);
+			border-left: 3px solid #64748b;
+			animation: slide-in 0.2s ease-out;
+		}
+
+		@keyframes slide-in {
+			from {
+				transform: translateX(10px);
+				opacity: 0;
+			}
+
+			to {
+				transform: translateX(0);
+				opacity: 1;
+			}
+		}
+
+		.event-row.sent {
+			border-left-color: #6366f1;
+		}
+
+		.event-row.recv {
+			border-left-color: #10b981;
+		}
+
+		.event-row.state {
+			border-left-color: #a855f7;
+		}
+
+		/* SVG Graph Styles */
+		#svg-canvas {
+			width: 100%;
+			height: 100%;
+			max-width: 700px;
+			max-height: 700px;
+		}
+
+		.net-line {
+			stroke: rgba(255, 255, 255, 0.06);
+			stroke-width: 2;
+			stroke-dasharray: 4 4;
+		}
+
+		.net-line.active {
+			stroke: rgba(99, 102, 241, 0.2);
+			stroke-dasharray: none;
+		}
+
+		.node-group {
+			cursor: pointer;
+			transition: all 0.3s;
+		}
+
+		.node-outer-glow {
+			transition: all 0.5s ease;
+		}
+
+		.node-follower .node-outer-glow {
+			fill: rgba(59, 130, 246, 0.05);
+			stroke: rgba(59, 130, 246, 0.4);
+			filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.3));
+		}
+
+		.node-candidate .node-outer-glow {
+			fill: rgba(245, 158, 11, 0.05);
+			stroke: rgba(245, 158, 11, 0.4);
+			filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.3));
+		}
+
+		.node-leader .node-outer-glow {
+			fill: rgba(16, 185, 129, 0.05);
+			stroke: rgba(16, 185, 129, 0.5);
+			filter: drop-shadow(0 0 15px rgba(16, 185, 129, 0.5));
+		}
+
+		.node-offline .node-outer-glow {
+			fill: rgba(239, 68, 68, 0.02);
+			stroke: rgba(239, 68, 68, 0.2);
+			filter: none;
+		}
+
+		.node-body {
+			fill: #151525;
+			stroke: rgba(255, 255, 255, 0.1);
+			stroke-width: 2;
+		}
+
+		.node-id-text {
+			fill: #ffffff;
+			font-size: 18px;
+			font-weight: 700;
+			text-anchor: middle;
+			dominant-baseline: middle;
+		}
+
+		.node-role-text {
+			fill: #94a3b8;
+			font-size: 10px;
+			font-weight: 600;
+			text-anchor: middle;
+			text-transform: uppercase;
+		}
+
+		.node-term-text {
+			fill: #64748b;
+			font-size: 9px;
+			font-family: 'JetBrains Mono', monospace;
+			text-anchor: middle;
+		}
+
+		/* Message Packet Dot */
+		.packet {
+			r: 6;
+			filter: drop-shadow(0 0 4px var(--shadow-color));
+			animation: move-packet 0.8s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+		}
+
+		@keyframes move-packet {
+			from {
+				offset-distance: 0%;
+			}
+
+			to {
+				offset-distance: 100%;
+			}
+		}
+	</style>
+</head>
+
+<body>
+	<header>
+		<div class="logo">
+			<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+				<path d="M12 2L2 22H22L12 2Z" stroke="url(#logo-grad)" stroke-width="2"
+					stroke-linejoin="round" />
+				<defs>
+					<linearGradient id="logo-grad" x1="2" y1="2" x2="22" y2="22"
+						gradientUnits="userSpaceOnUse">
+						<stop stop-color="#6366f1" />
+						<stop offset="1" stop-color="#a855f7" />
+					</linearGradient>
+				</defs>
+			</svg>
+			Rafty Raft Cluster (WASM)
+		</div>
+		<div class="status-container">
+			<div class="pulse"></div>
+			<span id="connection-status">Loading WASM...</span>
+		</div>
+	</header>
+
+	<main>
+		<div class="visualizer-pane">
+			<svg id="svg-canvas" viewBox="0 0 600 600">
+				<!-- Lines will be drawn first so they sit below nodes -->
+				<g id="connections-group"></g>
+				<!-- Animating Packets Group -->
+				<g id="packets-group"></g>
+				<!-- Nodes Group -->
+				<g id="nodes-group"></g>
+			</svg>
+		</div>
+
+		<div class="sidebar">
+			<!-- Dynamic Simulation Speed Controller & Reset Button -->
+			<div
+				style="background: rgba(30, 30, 50, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 20px;">
+				<h3 class="pane-title" style="margin-bottom: 15px;">Cluster Tuning</h3>
+				<div style="display: flex; flex-direction: column; gap: 10px;">
+					<div
+						style="display: flex; justify-content: space-between; font-size: 14px; color: #94a3b8;">
+						<span>Simulation Tick Rate</span>
+						<span><span id="tick-rate-val">100</span>ms</span>
+					</div>
+					<input type="range" id="tick-rate-slider" min="50" max="1000" step="50"
+						value="100"
+						style="width: 100%; accent-color: #6366f1; cursor: pointer; background: #1e1e32; border-radius: 6px; height: 6px; appearance: none; outline: none;">
+					<div
+						style="display: flex; justify-content: space-between; font-size: 10px; color: #64748b; font-family: 'JetBrains Mono', monospace;">
+						<span>Fast (50ms)</span>
+						<span>Slow (1000ms)</span>
+					</div>
+
+					<button class="btn-toggle btn-kill"
+						style="width: 100%; margin-top: 15px; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.2); color: #ef4444;"
+						onclick="restartCluster()">
+						Restart Cluster from Scratch
+					</button>
+				</div>
+			</div>
+
+			<!-- Message Trace Log Panel (Collapsible, default hidden) -->
+			<div class="event-log-container"
+				style="background: rgba(30, 30, 50, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 15px; max-height: none; flex-grow: 0;">
+				<h3 class="pane-title" onclick="toggleMessageLog()"
+					style="cursor: pointer; display: flex; align-items: center; justify-content: space-between; width: 100%; user-select: none;">
+					<span style="display: flex; align-items: center; gap: 8px;">
+						<span id="log-toggle-arrow"
+							style="display: inline-block; transition: transform 0.2s; transform: rotate(-90deg);">&#9662;</span>
+						Message Trace Log
+					</span>
+					<span id="log-status-badge"
+						style="font-size: 11px; padding: 2px 8px; border-radius: 99px; font-weight: 500; text-transform: uppercase; background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); transition: all 0.2s;">Disabled</span>
+				</h3>
+				<div id="event-log-body" style="display: none; flex-direction: column; gap: 15px;">
+					<div style="font-size:12px; font-weight:normal; color:#64748b;">showing last 50
+					</div>
+					<div class="event-log" id="event-log-container"
+						style="height: 180px; max-height: 180px;">
+						<!-- Dynamic Event Logs -->
+					</div>
+				</div>
+			</div>
+
+			<div>
+				<h3 class="pane-title" style="margin-bottom: 20px;">Cluster Nodes</h3>
+				<div class="node-list" id="node-list-container">
+					<!-- Dynamic Node Cards -->
+				</div>
+			</div>
+		</div>
+	</main>
+
+	<script type="module" src="./app.js"></script>
+</body>
+
+</html>

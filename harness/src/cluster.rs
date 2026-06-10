@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::sync::mpsc::channel;
 
@@ -8,8 +9,48 @@ use raft::{
 
 use crate::{FaultRate, FaultyChannel, MemStorage, NO_FAULT, TestChannel, TestNode};
 
+/// Internal event for tracking state changes (non-WASM stub)
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub enum ClusterEvent {
+    NodeStateChanged { node_id: u64 },
+    MessageSent { from: u64, to: u64, msg_type: String },
+    NodePaused { node_id: u64 },
+    NodeResumed { node_id: u64 },
+}
+
+/// Serializable message for visualization (non-WASM stub)
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct ClusterMessage {
+    pub from: u64,
+    pub to: u64,
+    pub msg_type: String,
+    pub term: u64,
+    pub timestamp: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ClusterMessage {
+    pub fn new(from: u64, to: u64, msg_type: String, term: u64, timestamp: u64) -> Self {
+        Self { from, to, msg_type, term, timestamp }
+    }
+}
+
+/// Internal event for tracking state changes (WASM)
+#[cfg(target_arch = "wasm32")]
+pub use crate::wasm_types::{ClusterEvent, ClusterMessage};
+
 pub struct Cluster {
     pub nodes: Vec<TestNode>,
+    /// Track paused/killed nodes
+    pub paused_nodes: HashSet<u64>,
+    /// Buffer for UI messages
+    pub message_buffer: Vec<ClusterMessage>,
+    /// State change listeners
+    state_callbacks: Vec<Box<dyn FnMut(&ClusterEvent)>>,
+    /// Current tick rate in milliseconds
+    pub tick_rate_ms: u64,
 }
 
 impl Cluster {
@@ -53,7 +94,13 @@ impl Cluster {
                 )
             })
             .collect();
-        Self { nodes }
+        Self {
+            nodes,
+            paused_nodes: HashSet::new(),
+            message_buffer: Vec::new(),
+            state_callbacks: Vec::new(),
+            tick_rate_ms: 100, // Default 100ms tick rate
+        }
     }
 
     pub fn initial_config(size: u64) -> InitialConfig {
@@ -138,6 +185,88 @@ impl Cluster {
             assert!(predicate(node));
         }
     }
+
+    /// Check if a node is paused
+    pub fn is_node_paused(&self, node_id: u64) -> bool {
+        self.paused_nodes.contains(&node_id)
+    }
+
+    /// Tick only active (non-paused) nodes and process incoming messages
+    pub fn tick_active(&mut self) {
+        // First, tick all active nodes (increment timers, may send messages)
+        for node in &mut self.nodes {
+            if !self.paused_nodes.contains(&u64::from(node.id)) {
+                node.tick();
+            }
+        }
+        
+        // Then, step all active nodes to process incoming messages
+        for node in &mut self.nodes {
+            if !self.paused_nodes.contains(&u64::from(node.id)) {
+                if let Ok(msg) = node.channel.recv.try_recv() {
+                    node.step(msg.into()).unwrap();
+                }
+            }
+        }
+    }
+
+    /// Register a state change callback
+    pub fn add_state_callback<F>(&mut self, callback: F)
+    where
+        F: FnMut(&ClusterEvent) + 'static,
+    {
+        self.state_callbacks.push(Box::new(callback));
+    }
+
+    /// Emit a state change event to all listeners
+    fn emit_event(&mut self, event: ClusterEvent) {
+        for callback in &mut self.state_callbacks {
+            callback(&event);
+        }
+    }
+
+    /// Pause a node (simulate crash)
+    pub fn pause_node(&mut self, node_id: u64) {
+        if !self.paused_nodes.contains(&node_id) {
+            self.paused_nodes.insert(node_id);
+            self.emit_event(ClusterEvent::NodePaused { node_id });
+        }
+    }
+
+    /// Resume a paused node
+    pub fn resume_node(&mut self, node_id: u64) {
+        if self.paused_nodes.remove(&node_id) {
+            self.emit_event(ClusterEvent::NodeResumed { node_id });
+        }
+    }
+
+    /// Toggle node paused state
+    pub fn toggle_node(&mut self, node_id: u64) {
+        if self.paused_nodes.contains(&node_id) {
+            self.resume_node(node_id);
+        } else {
+            self.pause_node(node_id);
+        }
+    }
+
+    /// Record a message to the buffer
+    pub fn record_message(&mut self, msg: ClusterMessage) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.message_buffer.push(msg.clone());
+            self.emit_event(ClusterEvent::MessageSent { message: msg.clone() });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.message_buffer.push(msg.clone());
+            self.emit_event(ClusterEvent::MessageSent { from: msg.from, to: msg.to, msg_type: msg.msg_type });
+        }
+    }
+
+    /// Get and clear new messages
+    pub fn drain_messages(&mut self) -> Vec<ClusterMessage> {
+        std::mem::take(&mut self.message_buffer)
+    }
 }
 
 fn test_channels_from_cluster_size(size: u64, drop_rate: FaultRate) -> Vec<TestChannel> {
@@ -160,6 +289,7 @@ fn test_channels_from_cluster_size(size: u64, drop_rate: FaultRate) -> Vec<TestC
                 .collect(),
             recv,
             id: id as u64,
+            on_message_sent: None,
         })
         .collect();
 
