@@ -518,6 +518,16 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             self.storage.store.append(req.entries)?;
         }
 
+        // Update commit index
+        if req.leader_commit > self.storage.committed {
+            let last_new_entry_index = self.storage.store.last_index();
+            self.storage.committed = std::cmp::min(req.leader_commit, last_new_entry_index);
+            info!(
+                "[{}] Follower advancing commit index to {}",
+                self.id, self.storage.committed
+            );
+        }
+
         self.send_append_response(true);
         Ok(())
     }
@@ -546,8 +556,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                     let progress = &mut state.follower_progress[follower_id];
                     if resp.success {
                         // Update match_index based on what was replicated
-                        // For now, we set it to the next_index - 1 since we don't track exact match yet
-                        let match_idx = progress.next_index - 1;
+                        let match_idx = resp.last_index;
                         progress.update_on_success(match_idx);
                     } else {
                         // Decrement next_index to retry with earlier entries
@@ -557,7 +566,52 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             }
         }
 
+        self.maybe_commit_entries();
+
         Ok(())
+    }
+
+    /// Advance commit index if a majority of nodes have replicated an entry from the current term.
+    fn maybe_commit_entries(&mut self) {
+        let last_index = self.storage.store.last_index();
+        let current_committed = self.storage.committed;
+
+        let Role::Leader(ref state) = self.role else {
+            return;
+        };
+
+        // Find all match indices, including the leader's own last index
+        let mut match_indices: Vec<u64> = state
+            .follower_progress
+            .iter_others()
+            .map(|(_, p)| p.match_index)
+            .collect();
+        match_indices.push(last_index);
+
+        // Sort in ascending order
+        match_indices.sort_unstable();
+
+        // The index that is replicated on a majority of nodes is at:
+        // match_indices[match_indices.len() / 2] in a sorted array
+        let majority_index = match_indices[match_indices.len() / 2];
+
+        // Only commit if the majority index is greater than current commit index
+        // and the entry at majority_index was created in the current term
+        if majority_index > current_committed {
+            if let Ok(term) = self.storage.store.term(majority_index) {
+                if term == self.term {
+                    info!(
+                        "[{}] Leader advancing commit index from {} to {}",
+                        self.id, current_committed, majority_index
+                    );
+                    self.storage.committed = majority_index;
+                    
+                    // After advancing commit index, broadcast AppendEntries to followers
+                    // to notify them of the new commit index
+                    self.replicate_to_followers();
+                }
+            }
+        }
     }
 
     /// Replicate log entries to all followers.
@@ -634,6 +688,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                 from: self.id.into(),
                 term: self.term,
                 success,
+                last_index: self.storage.store.last_index(),
             })
             .into(),
         );

@@ -72,6 +72,7 @@ pub mod proto {
                     from: m.from,
                     term: m.term,
                     success: m.success,
+                    last_index: m.last_index,
                     ..Default::default()
                 },
                 Message::RequestVote(m) => ProtoMessage {
@@ -136,6 +137,7 @@ pub mod proto {
                         from,
                         term,
                         success: value.success,
+                        last_index: value.last_index,
                     })
                 }
                 ProtoMessageType::RequestVote => Message::RequestVote(RequestVote {
@@ -218,6 +220,7 @@ pub mod proto {
         pub from: u64,
         pub term: u64,
         pub success: bool,
+        pub last_index: u64,
     }
 
     #[derive(Debug, PartialEq)]

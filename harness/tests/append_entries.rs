@@ -357,6 +357,7 @@ fn append_entries_leader_response_success() {
         from: cluster.nodes[0].id.into(),
         term: 1,
         success: true,
+        last_index: 1,
     });
     cluster.get_mut(1).channel.send(response.into());
 
@@ -395,6 +396,7 @@ fn append_entries_leader_response_failure_backtrack() {
         from: cluster.nodes[0].id.into(),
         term: 1,
         success: false,
+        last_index: 0,
     });
     cluster.get_mut(1).channel.send(response.into());
 
