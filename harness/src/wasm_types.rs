@@ -166,6 +166,49 @@ impl ClusterState {
     }
 }
 
+/// Serializable Raft log entry for JavaScript consumption
+#[wasm_bindgen]
+#[derive(Clone, Serialize)]
+pub struct RaftLogEntry {
+    index: u64,        // Log entry index (1-based)
+    term: u64,         // Term in which entry was created
+    data: String,      // UTF-8 decoded data (key-value as "key:value" or JSON)
+    committed: bool,   // Whether entry is committed
+}
+
+#[wasm_bindgen]
+impl RaftLogEntry {
+    #[wasm_bindgen(constructor)]
+    pub fn new(index: u64, term: u64, data: String, committed: bool) -> Self {
+        Self {
+            index,
+            term,
+            data,
+            committed,
+        }
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn index(&self) -> u64 {
+        self.index
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn term(&self) -> u64 {
+        self.term
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn data(&self) -> String {
+        self.data.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn committed(&self) -> bool {
+        self.committed
+    }
+}
+
 /// Internal event for tracking state changes (WASM-compatible, no raft::Role)
 pub enum ClusterEvent {
     NodeStateChanged { node_id: u64, term: u64 },

@@ -8,6 +8,11 @@ const animationPaths = {};
 let messageLogOpen = false;
 let tickRateIntervalId = null;
 
+// Log view state
+let currentView = 'cluster';  // 'cluster' or 'logs'
+let selectedNodeId = 1;       // Default to node 1
+const CLUSTER_SIZE = 5;
+
 // Calculate Circle Positions for SVG
 const cx = 300;
 const cy = 300;
@@ -384,6 +389,7 @@ function startUpdateLoop() {
 		if (cluster) {
 			const state = cluster.get_state();
 			renderUI(state);
+			updateLogUI(state);
 		}
 	};
 	
@@ -433,12 +439,146 @@ async function initApp() {
 	}
 }
 
+// ==================== LOG VIEW FUNCTIONS ====================
+
+/**
+ * Toggle between cluster view and log view
+ */
+function toggleView(viewName) {
+	currentView = viewName;
+	
+	const clusterView = document.getElementById('cluster-view');
+	const logView = document.getElementById('log-view');
+	const btnCluster = document.getElementById('btn-cluster-view');
+	const btnLog = document.getElementById('btn-log-view');
+	
+	if (viewName === 'cluster') {
+		clusterView.style.display = 'grid';
+		logView.style.display = 'none';
+		btnCluster.classList.add('active');
+		btnLog.classList.remove('active');
+	} else if (viewName === 'logs') {
+		clusterView.style.display = 'none';
+		logView.style.display = 'block';
+		btnLog.classList.add('active');
+		btnCluster.classList.remove('active');
+		renderLogView();
+	}
+}
+
+/**
+ * Render the log view with node selector and log entries
+ */
+function renderLogView() {
+	renderNodeSelector();
+	updateLogView();
+}
+
+/**
+ * Render node selector buttons
+ */
+function renderNodeSelector() {
+	const container = document.getElementById('log-view-node-buttons');
+	if (!container) return;
+	
+	container.innerHTML = '';
+	
+	for (let i = 1; i <= CLUSTER_SIZE; i++) {
+		const btn = document.createElement('button');
+		btn.className = `node-btn${i === selectedNodeId ? ' selected' : ''}`;
+		btn.textContent = `N${i}`;
+		btn.onclick = () => selectNodeInLogView(i);
+		container.appendChild(btn);
+	}
+}
+
+/**
+ * Select a node in the log view
+ */
+function selectNodeInLogView(nodeId) {
+	selectedNodeId = nodeId;
+	renderNodeSelector();
+	updateLogView();
+}
+
+/**
+ * Update the log entries display
+ */
+function updateLogView() {
+	const container = document.getElementById('log-entries-container');
+	if (!container || !cluster) return;
+	
+	try {
+		const logs = cluster.get_node_logs(BigInt(selectedNodeId));
+		console.log('Log view - Node', selectedNodeId, 'logs:', logs);
+		const entries = logs || [];
+		
+		if (entries.length === 0) {
+			container.innerHTML = `
+				<div class="log-empty-state">
+					<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+						<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+						<polyline points="14 2 14 8 20 8"/>
+						<line x1="16" y1="13" x2="8" y2="13"/>
+						<line x1="16" y1="17" x2="8" y2="17"/>
+					</svg>
+					<p>No log entries for Node ${selectedNodeId} yet. Log entries will appear here when the leader replicates data.</p>
+				</div>
+			`;
+			return;
+		}
+		
+		let html = '';
+		for (const entry of entries) {
+			const committedClass = entry.committed ? 'committed' : 'uncommitted';
+			const badgeClass = entry.committed ? 'committed' : 'uncommitted';
+			const badgeText = entry.committed ? 'Committed' : 'Pending';
+			const dataClass = entry.data ? '' : 'empty';
+			const dataDisplay = entry.data || '(empty)';
+			
+			html += `
+				<div class="log-entry ${committedClass}">
+					<div class="log-index">Index: ${entry.index}</div>
+					<div class="log-term">Term: ${entry.term}</div>
+					<div class="log-data ${dataClass}">${escapeHtml(dataDisplay)}</div>
+					<div class="log-committed-badge ${badgeClass}">${badgeText}</div>
+				</div>
+			`;
+		}
+		
+		container.innerHTML = html;
+	} catch (error) {
+		console.error('Error rendering log view:', error);
+		container.innerHTML = `<div class="log-empty-state"><p>Error loading logs: ${error.message}</p></div>`;
+	}
+}
+
+/**
+ * Update log UI when cluster state changes (called from main render loop)
+ */
+function updateLogUI(data) {
+	if (currentView === 'logs') {
+		updateLogView();
+	}
+}
+
+/**
+ * Escape HTML special characters
+ */
+function escapeHtml(text) {
+	const div = document.createElement('div');
+	div.textContent = text;
+	return div.innerHTML;
+}
+
 // Make functions available globally for HTML onclick handlers
 window.toggleNode = toggleNode;
 window.changeTickRate = changeTickRate;
 window.restartCluster = restartCluster;
 window.toggleMessageLog = toggleMessageLog;
 window.toggleClusterPause = toggleClusterPause;
+window.toggleView = toggleView;
+window.selectNodeInLogView = selectNodeInLogView;
 
 // Start the app
 initApp();

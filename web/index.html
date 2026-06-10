@@ -85,15 +85,21 @@
 			}
 		}
 
-		main {
-			display: grid;
-			grid-template-columns: 1fr 400px;
-			flex-grow: 1;
-			height: calc(100vh - 73px);
-			overflow: hidden;
-		}
+	main {
+		display: flex;
+		flex-grow: 1;
+		height: calc(100vh - 73px);
+		overflow: hidden;
+	}
 
-		.visualizer-pane {
+	#cluster-view {
+		display: grid;
+		grid-template-columns: 1fr 400px;
+		width: 100%;
+		height: 100%;
+	}
+
+	.visualizer-pane {
 			position: relative;
 			background: radial-gradient(circle at 50% 50%, #16162a 0%, #0b0b14 100%);
 			display: flex;
@@ -384,6 +390,238 @@
 				offset-distance: 100%;
 			}
 		}
+
+		/* View Toggle Buttons */
+		.view-toggle-buttons {
+			display: flex;
+			gap: 10px;
+			align-items: center;
+		}
+
+		.view-toggle-btn {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 8px 16px;
+			background: rgba(30, 30, 50, 0.4);
+			border: 1px solid rgba(255, 255, 255, 0.1);
+			border-radius: 8px;
+			color: #94a3b8;
+			font-size: 14px;
+			font-weight: 500;
+			font-family: 'Outfit', sans-serif;
+			cursor: pointer;
+			transition: all 0.2s;
+		}
+
+		.view-toggle-btn:hover {
+			background: rgba(99, 102, 241, 0.15);
+			border-color: rgba(99, 102, 241, 0.4);
+			color: #e2e8f0;
+		}
+
+		.view-toggle-btn.active {
+			background: rgba(99, 102, 241, 0.2);
+			border-color: rgba(99, 102, 241, 0.5);
+			color: #818cf8;
+		}
+
+		.view-toggle-btn svg {
+			flex-shrink: 0;
+		}
+
+		/* Log View Styles */
+		#log-view {
+			background: rgba(10, 10, 20, 0.8);
+			display: flex;
+			flex-direction: column;
+		}
+
+		.log-view-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			padding: 20px 40px;
+			background: rgba(15, 15, 27, 0.9);
+			border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+			gap: 20px;
+		}
+
+		.log-view-title {
+			font-size: 20px;
+			font-weight: 600;
+			color: #f8fafc;
+			display: flex;
+			align-items: center;
+			gap: 10px;
+		}
+
+		.node-selector {
+			display: flex;
+			align-items: center;
+			gap: 12px;
+		}
+
+		.node-selector-label {
+			font-size: 14px;
+			color: #94a3b8;
+			font-weight: 500;
+		}
+
+		.node-buttons {
+			display: flex;
+			gap: 8px;
+		}
+
+		.node-btn {
+			padding: 6px 14px;
+			background: rgba(30, 30, 50, 0.5);
+			border: 1px solid rgba(255, 255, 255, 0.1);
+			border-radius: 6px;
+			color: #94a3b8;
+			font-size: 13px;
+			font-weight: 600;
+			font-family: 'JetBrains Mono', monospace;
+			cursor: pointer;
+			transition: all 0.2s;
+		}
+
+		.node-btn:hover {
+			background: rgba(99, 102, 241, 0.2);
+			border-color: rgba(99, 102, 241, 0.4);
+			color: #e2e8f0;
+		}
+
+		.node-btn.selected {
+			background: rgba(99, 102, 241, 0.25);
+			border-color: rgba(99, 102, 241, 0.6);
+			color: #818cf8;
+		}
+
+		.log-entries-container {
+			flex-grow: 1;
+			overflow-y: auto;
+			padding: 20px 40px;
+		}
+
+		.log-entries-container::-webkit-scrollbar {
+			width: 8px;
+		}
+
+		.log-entries-container::-webkit-scrollbar-track {
+			background: rgba(0, 0, 0, 0.2);
+		}
+
+		.log-entries-container::-webkit-scrollbar-thumb {
+			background: rgba(99, 102, 241, 0.3);
+			border-radius: 4px;
+		}
+
+		.log-entries-container::-webkit-scrollbar-thumb:hover {
+			background: rgba(99, 102, 241, 0.5);
+		}
+
+		.log-entry {
+			display: grid;
+			grid-template-columns: 80px 80px 1fr 60px;
+			gap: 16px;
+			align-items: center;
+			padding: 12px 16px;
+			margin-bottom: 8px;
+			background: rgba(30, 30, 50, 0.3);
+			border: 1px solid rgba(255, 255, 255, 0.05);
+			border-radius: 8px;
+			font-family: 'JetBrains Mono', monospace;
+			font-size: 13px;
+			transition: all 0.2s;
+		}
+
+		.log-entry:hover {
+			background: rgba(30, 30, 50, 0.5);
+			border-color: rgba(99, 102, 241, 0.2);
+		}
+
+		.log-entry.committed {
+			border-left: 3px solid #10b981;
+		}
+
+		.log-entry.uncommitted {
+			border-left: 3px solid #f59e0b;
+			background: rgba(245, 158, 11, 0.05);
+		}
+
+		.log-entry.committed:hover {
+			border-left-color: #34d399;
+		}
+
+		.log-entry.uncommitted:hover {
+			border-left-color: #fbbf24;
+		}
+
+		.log-index {
+			color: #64748b;
+			font-weight: 600;
+		}
+
+		.log-term {
+			color: #64748b;
+			font-weight: 600;
+		}
+
+		.log-data {
+			color: #e2e8f0;
+			word-break: break-all;
+			font-family: 'JetBrains Mono', monospace;
+		}
+
+		.log-data.empty {
+			color: #475569;
+			font-style: italic;
+		}
+
+		.log-committed-badge {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			padding: 4px 10px;
+			border-radius: 99px;
+			font-size: 11px;
+			font-weight: 600;
+			text-transform: uppercase;
+			letter-spacing: 0.5px;
+		}
+
+		.log-committed-badge.committed {
+			background: rgba(16, 185, 129, 0.15);
+			color: #34d399;
+			border: 1px solid rgba(16, 185, 129, 0.3);
+		}
+
+		.log-committed-badge.uncommitted {
+			background: rgba(245, 158, 11, 0.15);
+			color: #fbbf24;
+			border: 1px solid rgba(245, 158, 11, 0.3);
+		}
+
+		.log-empty-state {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			padding: 60px 20px;
+			color: #64748b;
+			text-align: center;
+		}
+
+		.log-empty-state svg {
+			margin-bottom: 16px;
+			opacity: 0.5;
+		}
+
+		.log-empty-state p {
+			font-size: 14px;
+			color: #94a3b8;
+		}
 	</style>
 </head>
 
@@ -410,7 +648,9 @@
 	</header>
 
 	<main>
-		<div class="visualizer-pane">
+		<!-- Cluster View Container -->
+		<div id="cluster-view">
+			<div class="visualizer-pane">
 			<svg id="svg-canvas" viewBox="0 0 600 600">
 				<!-- Lines will be drawn first so they sit below nodes -->
 				<g id="connections-group"></g>
@@ -422,6 +662,26 @@
 		</div>
 
 		<div class="sidebar">
+			<!-- View Toggle Buttons -->
+			<div class="view-toggle-buttons" style="margin-bottom: 20px;">
+				<button class="view-toggle-btn active" id="btn-cluster-view" onclick="toggleView('cluster')">
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<circle cx="12" cy="12" r="3"/>
+						<circle cx="12" cy="12" r="8" stroke-dasharray="4 2"/>
+					</svg>
+					Cluster View
+				</button>
+				<button class="view-toggle-btn" id="btn-log-view" onclick="toggleView('logs')">
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+						<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+						<polyline points="14 2 14 8 20 8"/>
+						<line x1="16" y1="13" x2="8" y2="13"/>
+						<line x1="16" y1="17" x2="8" y2="17"/>
+					</svg>
+					Log View
+				</button>
+			</div>
+
 			<!-- Dynamic Simulation Speed Controller & Reset Button -->
 			<div
 				style="background: rgba(30, 30, 50, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 20px;">
@@ -482,6 +742,24 @@
 				<div class="node-list" id="node-list-container">
 					<!-- Dynamic Node Cards -->
 				</div>
+			</div>
+		</div>
+
+		<!-- Log View Container -->
+		<div id="log-view" style="display: none; width: 100%; height: 100%; overflow: hidden;">
+			<!-- Node selector bar -->
+			<div class="log-view-header">
+				<div class="log-view-title">Raft Log Entries</div>
+				<div class="node-selector">
+					<span class="node-selector-label">Select Node:</span>
+					<div class="node-buttons" id="log-view-node-buttons">
+						<!-- Node buttons will be inserted here -->
+					</div>
+				</div>
+			</div>
+			<!-- Log entries container -->
+			<div class="log-entries-container" id="log-entries-container">
+				<!-- Log entries will be rendered here -->
 			</div>
 		</div>
 	</main>

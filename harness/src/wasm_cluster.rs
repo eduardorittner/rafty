@@ -7,7 +7,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::window;
 
 use crate::Cluster;
-use crate::wasm_types::{ClusterMessage, NodeState};
+use crate::wasm_types::{ClusterMessage, NodeState, RaftLogEntry};
 use proto::proto::ProtoMessageType;
 use raft::{Role, Storage};
 
@@ -377,6 +377,53 @@ impl WasmCluster {
         }
         self.message_buffer.borrow_mut().clear();
         self.notify_state_change();
+    }
+
+    /// Gets all log entries for a specific node
+    pub fn get_node_logs(&self, node_id: u64) -> JsValue {
+        let inner = self.inner.borrow();
+        let cluster = &inner.cluster;
+
+        // Find the node
+        let node = cluster.nodes.iter().find(|n| u64::from(n.id) == node_id);
+        if node.is_none() {
+            return JsValue::from_str("[]");
+        }
+        let node = node.unwrap();
+
+        let committed_index = node.storage.committed;
+        let storage = &node.storage.store;
+        let last_index = storage.last_index();
+
+        // Build log entries array
+        let mut entries: Vec<RaftLogEntry> = Vec::new();
+
+        if last_index == 0 {
+            return serde_wasm_bindgen::to_value(&entries).unwrap_or(JsValue::NULL);
+        }
+
+        // Iterate through all entries (1-based indexing)
+        for idx in 1..=last_index {
+            if let Ok(entry) = storage.term(idx) {
+                // Get entry data - try to get the full entry with data
+                if let Ok(entry_vec) = storage.entries(idx, idx + 1) {
+                    if let Some(entry_data) = entry_vec.first() {
+                        // Decode data bytes as UTF-8 with fallback
+                        let data_str = String::from_utf8_lossy(&entry_data.data).to_string();
+                        let is_committed = idx <= committed_index;
+
+                        entries.push(RaftLogEntry::new(
+                            entry_data.index,
+                            entry_data.term,
+                            data_str,
+                            is_committed,
+                        ));
+                    }
+                }
+            }
+        }
+
+        serde_wasm_bindgen::to_value(&entries).unwrap_or(JsValue::NULL)
     }
 }
 
