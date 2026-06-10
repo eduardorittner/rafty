@@ -8,11 +8,11 @@ use crate::progress::FollowerProgress;
 use crate::quorum::{Quorum, Vote};
 use crate::storage::Storage;
 use proto::proto::*;
-use rand::RngExt;
 use tracing::{debug, error, info};
+use crate::rng::RngProvider;
 
 #[derive(Debug)]
-pub struct Node<Store: Storage, Chan: Channel> {
+pub struct Node<Store: Storage, Chan: Channel, Rng: RngProvider> {
     pub id: ValidNodeId,
     /// Current term.
     pub term: u64,
@@ -30,6 +30,8 @@ pub struct Node<Store: Storage, Chan: Channel> {
     pub storage: RaftLog<Store>,
     /// Channel for sending messages
     pub channel: Chan,
+    /// Random number generator
+    pub rng: Rng,
     /// If a follower does not receive any message in [election_timeout] ticks, it
     /// becomes a candidate and starts a new election. This value is a random value
     /// set at the start of an election inside the range ([max_election_timeout],
@@ -129,8 +131,8 @@ pub struct LeaderState {
     pub follower_progress: NodeMap<FollowerProgress>,
 }
 
-impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
-    pub fn new(id: ValidNodeId, storage: Store, channel: Chan, config: InitialConfig) -> Self {
+impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
+    pub fn new(id: ValidNodeId, storage: Store, channel: Chan, rng: Rng, config: InitialConfig) -> Self {
         let mut node = Self {
             id,
             voted_for: INVALID_ID,
@@ -141,6 +143,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             config,
             storage: RaftLog::from_store(storage),
             channel,
+            rng,
         };
         node.generate_random_election_timeout();
         node
@@ -427,9 +430,9 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
     }
 
     pub fn generate_random_election_timeout(&mut self) {
-        self.election_timeout = rand::rng().random_range(
-            self.config.min_ticks_before_election.into()
-                ..self.config.max_ticks_before_election.into(),
+        self.election_timeout = self.rng.random_range(
+            self.config.min_ticks_before_election.into(),
+            self.config.max_ticks_before_election.into(),
         );
 
         debug!(

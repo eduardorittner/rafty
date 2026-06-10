@@ -8,6 +8,7 @@ mod node_map;
 mod progress;
 mod quorum;
 mod storage;
+mod rng;
 
 pub use communication::*;
 pub use config::*;
@@ -18,3 +19,4 @@ pub use node_id::*;
 pub use node_map::*;
 pub use progress::*;
 pub use storage::*;
+pub use rng::*;

@@ -4,7 +4,7 @@ use std::sync::mpsc::channel;
 
 use proto::proto::ProtoMessage;
 use raft::{
-    FollowerProgress, InitialConfig, LeaderState, Node, NodeId, NodeMap, Role, ValidNodeId,
+    FollowerProgress, InitialConfig, LeaderState, Node, NodeId, NodeMap, Role, ValidNodeId, RngProvider,
 };
 
 use crate::{FaultRate, FaultyChannel, MemStorage, NO_FAULT, TestChannel, TestNode};
@@ -57,8 +57,8 @@ impl ClusterMessage {
 #[cfg(target_arch = "wasm32")]
 pub use crate::wasm_types::{ClusterEvent, ClusterMessage};
 
-pub struct Cluster {
-    pub nodes: Vec<TestNode>,
+pub struct Cluster<Rng: RngProvider = raft::DefaultRng> {
+    pub nodes: Vec<TestNode<Rng>>,
     /// Track paused/killed nodes
     pub paused_nodes: HashSet<u64>,
     /// Buffer for UI messages
@@ -67,13 +67,35 @@ pub struct Cluster {
     state_callbacks: Vec<Box<dyn FnMut(&ClusterEvent)>>,
     /// Current tick rate in milliseconds
     pub tick_rate_ms: u64,
+    pub rng: Rng,
 }
 
-impl Cluster {
+impl Cluster<raft::DefaultRng> {
     pub fn new() -> Self {
         Self::from_drop_rate(NO_FAULT)
     }
 
+    pub fn from_drop_rate(drop_rate: FaultRate) -> Self {
+        Self::from_config(Self::initial_config(7), drop_rate)
+    }
+
+    pub fn from_config(config: InitialConfig, drop_rate: FaultRate) -> Self {
+        Self::from_config_with_rng(config, drop_rate, raft::DefaultRng)
+    }
+
+    pub fn initial_config(size: u64) -> InitialConfig {
+        InitialConfig {
+            id: ValidNodeId(NonZeroU64::new(1).unwrap()),
+            cluster_size: size,
+            min_ticks_before_election: NonZeroU64::new(10).unwrap(),
+            max_ticks_before_election: NonZeroU64::new(20).unwrap(),
+            ticks_between_heartbeats: NonZeroU64::new(1).unwrap(),
+            last_applied_idx: None,
+        }
+    }
+}
+
+impl<Rng: RngProvider> Cluster<Rng> {
     pub fn with_leader(mut self, leader_id: ValidNodeId) -> Self {
         let nodes_len = self.nodes.len() as u64;
 
@@ -92,12 +114,8 @@ impl Cluster {
         self
     }
 
-    pub fn from_drop_rate(drop_rate: FaultRate) -> Self {
-        Self::from_config(Self::initial_config(7), drop_rate)
-    }
-
-    pub fn from_config(config: InitialConfig, drop_rate: FaultRate) -> Self {
-        let channels = test_channels_from_cluster_size(config.cluster_size, drop_rate);
+    pub fn from_config_with_rng(config: InitialConfig, drop_rate: FaultRate, rng: Rng) -> Self {
+        let channels = test_channels_from_cluster_size(config.cluster_size, drop_rate, rng.clone());
         let nodes: Vec<_> = channels
             .into_iter()
             .enumerate()
@@ -106,6 +124,7 @@ impl Cluster {
                     ValidNodeId(NonZeroU64::new(id as u64 + 1).unwrap()),
                     MemStorage::new(),
                     channel,
+                    rng.clone(),
                     config.with_id(ValidNodeId(NonZeroU64::new(id as u64 + 1).unwrap())),
                 )
             })
@@ -116,28 +135,18 @@ impl Cluster {
             message_buffer: Vec::new(),
             state_callbacks: Vec::new(),
             tick_rate_ms: 500,
-        }
-    }
-
-    pub fn initial_config(size: u64) -> InitialConfig {
-        InitialConfig {
-            id: ValidNodeId(NonZeroU64::new(1).unwrap()),
-            cluster_size: size,
-            min_ticks_before_election: NonZeroU64::new(10).unwrap(),
-            max_ticks_before_election: NonZeroU64::new(20).unwrap(),
-            ticks_between_heartbeats: NonZeroU64::new(1).unwrap(),
-            last_applied_idx: None,
+            rng,
         }
     }
 
     /// Adds a node to the cluster, ensuring that the `nodes` vector remains sorted by ID.
-    pub fn add(&mut self, node: TestNode) {
+    pub fn add(&mut self, node: TestNode<Rng>) {
         self.nodes.push(node);
         self.nodes.sort_by_key(|n| u64::from(n.id));
     }
 
     /// Removes a node from the cluster by its ID.
-    pub fn remove(&mut self, id: u64) -> TestNode {
+    pub fn remove(&mut self, id: u64) -> TestNode<Rng> {
         let pos = self
             .nodes
             .iter()
@@ -164,7 +173,7 @@ impl Cluster {
     }
 
     /// Gets a reference to a node by its ID.
-    pub fn get(&self, id: u64) -> &TestNode {
+    pub fn get(&self, id: u64) -> &TestNode<Rng> {
         self.nodes
             .iter()
             .find(|n| u64::from(n.id) == id)
@@ -172,7 +181,7 @@ impl Cluster {
     }
 
     /// Gets a mutable reference to a node by its ID.
-    pub fn get_mut(&mut self, id: u64) -> &mut TestNode {
+    pub fn get_mut(&mut self, id: u64) -> &mut TestNode<Rng> {
         self.nodes
             .iter_mut()
             .find(|n| u64::from(n.id) == id)
@@ -195,7 +204,7 @@ impl Cluster {
 
     pub fn assert<P>(&self, mut predicate: P)
     where
-        P: FnMut(&TestNode) -> bool,
+        P: FnMut(&TestNode<Rng>) -> bool,
     {
         for node in &self.nodes {
             assert!(predicate(node));
@@ -296,7 +305,11 @@ impl Cluster {
     }
 }
 
-fn test_channels_from_cluster_size(size: u64, drop_rate: FaultRate) -> Vec<TestChannel> {
+fn test_channels_from_cluster_size<Rng: RngProvider>(
+    size: u64,
+    drop_rate: FaultRate,
+    rng: Rng,
+) -> Vec<TestChannel<Rng>> {
     let channels: Vec<_> = std::iter::repeat_n(None, size as usize)
         .map(|_: Option<u64>| channel::<ProtoMessage>())
         .collect();
@@ -312,7 +325,7 @@ fn test_channels_from_cluster_size(size: u64, drop_rate: FaultRate) -> Vec<TestC
         .map(|(id, recv)| TestChannel {
             channels: send_channels
                 .iter()
-                .map(|send| FaultyChannel::new(send, drop_rate))
+                .map(|send| FaultyChannel::new(send, drop_rate, rng.clone()))
                 .collect(),
             recv,
             id: id as u64,

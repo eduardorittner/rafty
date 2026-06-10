@@ -1,21 +1,21 @@
 use proto::proto::ProtoMessage;
-use raft::Channel;
+use raft::{Channel, RngProvider};
 use std::sync::mpsc::{Receiver, Sender};
 
 /// Callback type for message interception
 pub type MessageCallback = Box<dyn Fn(&ProtoMessage)>;
 
 /// Simple mspc based channel for testing
-pub struct TestChannel {
+pub struct TestChannel<Rng: RngProvider> {
     /// Channels for sending to other nodes, `channels[self.id]` is a sender to its own `recv`.
-    pub channels: Vec<FaultyChannel>,
+    pub channels: Vec<FaultyChannel<Rng>>,
     pub recv: Receiver<ProtoMessage>,
     pub id: u64,
     /// Callback invoked when a message is sent (for visualization)
     pub on_message_sent: Option<MessageCallback>,
 }
 
-impl std::fmt::Debug for TestChannel {
+impl<Rng: RngProvider> std::fmt::Debug for TestChannel<Rng> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TestChannel")
             .field("channels", &self.channels)
@@ -28,10 +28,11 @@ impl std::fmt::Debug for TestChannel {
 
 /// A sender channel with configured message drop rate.
 #[derive(Debug)]
-pub struct FaultyChannel {
+pub struct FaultyChannel<Rng: RngProvider> {
     pub channel: Sender<ProtoMessage>,
     /// Message drop rate is `drop_rate / 100`
     pub drop_rate: FaultRate,
+    pub rng: Rng,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -40,15 +41,16 @@ pub struct FaultRate(pub u8);
 pub const NO_FAULT: FaultRate = FaultRate(100);
 pub const ONLY_FAULT: FaultRate = FaultRate(0);
 
-impl FaultyChannel {
-    pub fn new(channel: &Sender<ProtoMessage>, drop_rate: FaultRate) -> Self {
+impl<Rng: RngProvider> FaultyChannel<Rng> {
+    pub fn new(channel: &Sender<ProtoMessage>, drop_rate: FaultRate, rng: Rng) -> Self {
         Self {
             channel: channel.clone(),
             drop_rate,
+            rng,
         }
     }
     pub fn send(&mut self, msg: ProtoMessage) {
-        if rand::random_range(1..=100) <= self.drop_rate.0 {
+        if self.rng.random_range(1, 101) <= self.drop_rate.0 as u64 {
             self.channel
                 .send(msg)
                 .expect("Write to test channel failed");
@@ -56,7 +58,7 @@ impl FaultyChannel {
     }
 }
 
-impl TestChannel {
+impl<Rng: RngProvider> TestChannel<Rng> {
     /// Set a callback to be invoked when a message is sent
     pub fn set_message_callback<F>(&mut self, callback: F)
     where
@@ -66,7 +68,7 @@ impl TestChannel {
     }
 }
 
-impl Channel for TestChannel {
+impl<Rng: RngProvider> Channel for TestChannel<Rng> {
     fn send(&mut self, msg: ProtoMessage) {
         assert!(msg.to > 0);
         let to = msg.to;

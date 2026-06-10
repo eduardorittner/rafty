@@ -14,4 +14,4 @@ pub use wasm_types::*;
 #[cfg(target_arch = "wasm32")]
 pub use wasm_cluster::*;
 
-pub type TestNode = raft::Node<MemStorage, TestChannel>;
+pub type TestNode<Rng = raft::DefaultRng> = raft::Node<MemStorage, TestChannel<Rng>, Rng>;
