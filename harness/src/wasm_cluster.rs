@@ -1,15 +1,15 @@
+use console_error_panic_hook;
 use js_sys::{Function, Object};
 use std::cell::RefCell;
 use std::rc::Rc;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::prelude::*;
 use web_sys::window;
-use console_error_panic_hook;
 
-use crate::wasm_types::{ClusterMessage, NodeState};
 use crate::Cluster;
-use raft::{Role, Storage};
+use crate::wasm_types::{ClusterMessage, NodeState};
 use proto::proto::ProtoMessageType;
+use raft::{Role, Storage};
 
 /// Internal cluster state tracker
 struct ClusterInternal {
@@ -22,10 +22,7 @@ impl ClusterInternal {
     fn new(cluster_size: u64, drop_rate: u8) -> Self {
         let drop_rate = if drop_rate > 100 { 100 } else { drop_rate };
         let fault_rate = crate::FaultRate(100 - drop_rate);
-        let cluster = Cluster::from_config(
-            Cluster::initial_config(cluster_size),
-            fault_rate,
-        );
+        let cluster = Cluster::from_config(Cluster::initial_config(cluster_size), fault_rate);
 
         Self {
             cluster,
@@ -57,7 +54,7 @@ impl WasmCluster {
     pub fn new(cluster_size: u64, drop_rate_percent: u8) -> Self {
         // Initialize panic hook for better error messages in browser
         console_error_panic_hook::set_once();
-        
+
         let internal = ClusterInternal::new(cluster_size, drop_rate_percent);
         let cluster = WasmCluster {
             inner: Rc::new(RefCell::new(internal)),
@@ -78,7 +75,7 @@ impl WasmCluster {
                 let callback_registry = Rc::clone(&callback_registry);
 
                 let node_id = u64::from(node.id);
-                
+
                 node.channel.set_message_callback(move |msg| {
                     let timestamp = window()
                         .and_then(|w| w.performance())
@@ -112,7 +109,10 @@ impl WasmCluster {
                                 for callback in callback_registry.borrow().iter() {
                                     let _ = callback.call1(
                                         &JsValue::NULL,
-                                        &JsValue::from_str(&format!("message:{}:{}:{}", msg.from, recipient_id, msg_type)),
+                                        &JsValue::from_str(&format!(
+                                            "message:{}:{}:{}",
+                                            msg.from, recipient_id, msg_type
+                                        )),
                                     );
                                 }
                             }
@@ -133,7 +133,10 @@ impl WasmCluster {
                         for callback in callback_registry.borrow().iter() {
                             let _ = callback.call1(
                                 &JsValue::NULL,
-                                &JsValue::from_str(&format!("message:{}:{}:{}", msg.from, msg.to, msg_type)),
+                                &JsValue::from_str(&format!(
+                                    "message:{}:{}:{}",
+                                    msg.from, msg.to, msg_type
+                                )),
                             );
                         }
                     }
@@ -150,7 +153,7 @@ impl WasmCluster {
         inner.is_running = true;
         let rate_ms = inner.cluster.tick_rate_ms;
         drop(inner);
-        
+
         // Start the timer to automatically tick the cluster
         if let Some(window) = window() {
             let cluster_clone = WasmCluster {
@@ -281,7 +284,7 @@ impl WasmCluster {
         let nodes_obj = Object::new();
         for node in &cluster.nodes {
             let node_id = u64::from(node.id);
-            
+
             // Check if node is paused/crashed first
             let is_paused = cluster.paused_nodes.contains(&node_id);
             let role_str = if is_paused {
@@ -306,7 +309,11 @@ impl WasmCluster {
             );
 
             let js_value = serde_wasm_bindgen::to_value(&node_state).unwrap_or(JsValue::NULL);
-            let _ = js_sys::Reflect::set(&nodes_obj, &JsValue::from_str(&node_id.to_string()), &js_value);
+            let _ = js_sys::Reflect::set(
+                &nodes_obj,
+                &JsValue::from_str(&node_id.to_string()),
+                &js_value,
+            );
         }
 
         // Get messages
@@ -322,7 +329,11 @@ impl WasmCluster {
         let state_obj = Object::new();
         let _ = js_sys::Reflect::set(&state_obj, &JsValue::from_str("nodes"), &nodes_js);
         let _ = js_sys::Reflect::set(&state_obj, &JsValue::from_str("messages"), &messages_js);
-        let _ = js_sys::Reflect::set(&state_obj, &JsValue::from_str("tick_rate_ms"), &JsValue::from(cluster.tick_rate_ms));
+        let _ = js_sys::Reflect::set(
+            &state_obj,
+            &JsValue::from_str("tick_rate_ms"),
+            &JsValue::from(cluster.tick_rate_ms),
+        );
         state_obj.into()
     }
 
