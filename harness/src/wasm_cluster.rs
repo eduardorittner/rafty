@@ -81,11 +81,12 @@ impl WasmCluster {
                         .unwrap_or(0);
 
                     let msg_type = match msg.msg_type() {
-                        ProtoMessageType::RequestVote => "RequestVote",
-                        ProtoMessageType::RequestVoteResponse => "RequestVoteResponse",
+                        ProtoMessageType::Heartbeat => "Heartbeat",
+                        ProtoMessageType::HeartbeatResponse => "HeartbeatResponse",
                         ProtoMessageType::AppendEntries => "AppendEntries",
                         ProtoMessageType::AppendEntriesResponse => "AppendEntriesResponse",
-                        ProtoMessageType::Heartbeat => "Heartbeat",
+                        ProtoMessageType::RequestVote => "RequestVote",
+                        ProtoMessageType::RequestVoteResponse => "RequestVoteResponse",
                     };
 
                     let cluster_msg = ClusterMessage::new(

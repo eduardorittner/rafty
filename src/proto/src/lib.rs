@@ -13,6 +13,7 @@ pub mod proto {
     #[derive(Debug, PartialEq)]
     pub enum Message {
         Heartbeat(Heartbeat),
+        HeartbeatResponse(Heartbeat),
         Append(Append),
         AppendResponse(AppendResponse),
         RequestVote(RequestVote),
@@ -23,6 +24,7 @@ pub mod proto {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum MessageType {
         Heartbeat,
+        HeartbeatResponse,
         Append,
         AppendResponse,
         RequestVote,
@@ -35,6 +37,16 @@ pub mod proto {
             match value {
                 Message::Heartbeat(m) => ProtoMessage {
                     msg_type: ProtoMessageType::Heartbeat.into(),
+                    to: m.to,
+                    from: m.from,
+                    term: m.term,
+                    commit: m.commit,
+                    last_term: m.last_term,
+                    last_index: m.last_index,
+                    ..Default::default()
+                },
+                Message::HeartbeatResponse(m) => ProtoMessage {
+                    msg_type: ProtoMessageType::HeartbeatResponse.into(),
                     to: m.to,
                     from: m.from,
                     term: m.term,
@@ -101,6 +113,14 @@ pub mod proto {
                     last_index: value.last_index,
                     last_term: value.last_term,
                 }),
+                ProtoMessageType::HeartbeatResponse => Message::HeartbeatResponse(Heartbeat {
+                    to,
+                    from,
+                    term,
+                    commit,
+                    last_index: value.last_index,
+                    last_term: value.last_term,
+                }),
                 ProtoMessageType::AppendEntries => Message::Append(Append {
                     to,
                     from,
@@ -148,6 +168,7 @@ pub mod proto {
         fn from(value: ProtoMessageType) -> Self {
             match value {
                 ProtoMessageType::Heartbeat => MessageType::Heartbeat,
+                ProtoMessageType::HeartbeatResponse => MessageType::HeartbeatResponse,
                 ProtoMessageType::AppendEntries => MessageType::Append,
                 ProtoMessageType::AppendEntriesResponse => MessageType::AppendResponse,
                 ProtoMessageType::RequestVote => MessageType::RequestVote,
@@ -160,6 +181,7 @@ pub mod proto {
         fn from(value: MessageType) -> Self {
             match value {
                 MessageType::Heartbeat => ProtoMessageType::Heartbeat,
+                MessageType::HeartbeatResponse => ProtoMessageType::HeartbeatResponse,
                 MessageType::Append => ProtoMessageType::AppendEntries,
                 MessageType::AppendResponse => ProtoMessageType::AppendEntriesResponse,
                 MessageType::RequestVote => ProtoMessageType::RequestVote,

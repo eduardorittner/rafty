@@ -26,8 +26,9 @@ message ProtoMessage {
 
 enum ProtoMessageType {
   Heartbeat = 0;
-  AppendEntries = 1;
-  AppendEntriesResponse = 2;
-  RequestVote = 3;
-  RequestVoteResponse = 4;
+  HeartbeatResponse = 1;
+  AppendEntries = 2;
+  AppendEntriesResponse = 3;
+  RequestVote = 4;
+  RequestVoteResponse = 5;
 }

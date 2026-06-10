@@ -151,6 +151,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         match msg {
             Message::StartCampaign => self.start_campaign(),
             Message::Heartbeat(m) => self.step_heartbeat(m),
+            Message::HeartbeatResponse(m) => self.step_heartbeat_response(m),
             Message::Append(m) => {
                 self.step_append(m)?;
             }
@@ -301,6 +302,36 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
         }
     }
 
+    /// Handle HeartbeatResponse as leader.
+    fn step_heartbeat_response(&mut self, resp: Heartbeat) {
+        // Validate term - step down if behind
+        if resp.term > self.term {
+            info!(
+                "[{}] received HeartbeatResponse with higher term {}, becoming follower",
+                self.id, resp.term
+            );
+            self.term = resp.term;
+            self.voted_for = INVALID_ID;
+            self.role = self.role.to_owned().become_follower();
+            return;
+        } else if resp.term < self.term {
+            return;
+        }
+
+        // Update follower progress (similar to AppendResponse)
+        let follower_id = ValidNodeId::new(resp.from);
+        if let Some(follower_id) = follower_id {
+            if let Role::Leader(ref mut state) = self.role {
+                if state.follower_progress.contains_key(follower_id) {
+                    let progress = &mut state.follower_progress[follower_id];
+                    // Heartbeat response indicates the follower is alive and in sync
+                    let match_idx = self.storage.store.last_index();
+                    progress.update_on_success(match_idx);
+                }
+            }
+        }
+    }
+
     fn step_vote_request(&mut self, req: RequestVote) {
         if req.candidate_term > self.term {
             self.term = req.candidate_term;
@@ -404,7 +435,7 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
 
     fn send_heartbeat_response_to(&mut self, to: u64) {
         self.channel.send(
-            Message::Heartbeat(Heartbeat {
+            Message::HeartbeatResponse(Heartbeat {
                 to,
                 from: self.id.into(),
                 term: self.term,

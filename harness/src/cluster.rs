@@ -123,8 +123,8 @@ impl Cluster {
         InitialConfig {
             id: ValidNodeId(NonZeroU64::new(1).unwrap()),
             cluster_size: size,
-            min_ticks_before_election: NonZeroU64::new(6).unwrap(),
-            max_ticks_before_election: NonZeroU64::new(12).unwrap(),
+            min_ticks_before_election: NonZeroU64::new(10).unwrap(),
+            max_ticks_before_election: NonZeroU64::new(20).unwrap(),
             ticks_between_heartbeats: NonZeroU64::new(1).unwrap(),
             last_applied_idx: None,
         }

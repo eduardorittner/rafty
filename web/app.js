@@ -103,9 +103,10 @@ function createNodeGraphics(total = 5) {
 }
 
 function getPacketColor(type) {
-	if (type.includes('Heartbeat')) return '#c084fc'; // Purple
-	if (type.includes('Vote')) return '#fbbf24';      // Gold
-	return '#2dd4bf';                                 // Teal
+	if (type === 'Heartbeat') return '#c084fc';        // Purple (leader -> follower/candidate)
+	if (type === 'HeartbeatResponse') return '#f472b6'; // Pink (follower/candidate -> leader)
+	if (type.includes('Vote')) return '#fbbf24';       // Gold
+	return '#2dd4bf';                                  // Teal
 }
 
 function animatePacket(from, to, type) {

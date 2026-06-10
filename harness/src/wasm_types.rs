@@ -87,7 +87,7 @@ impl NodeState {
 pub struct ClusterMessage {
     from: u64,
     to: u64,
-    msg_type: String,    // "Heartbeat", "Append", "AppendResponse", "RequestVote", "RequestVoteResponse"
+    msg_type: String,    // "Heartbeat", "HeartbeatResponse", "RequestVote", "RequestVoteResponse"
     term: u64,
     timestamp: u64,      // Unix timestamp in milliseconds
 }
