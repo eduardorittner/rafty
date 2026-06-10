@@ -69,11 +69,14 @@ impl WasmCluster {
             let mut inner = cluster.inner.borrow_mut();
             let message_buffer = Rc::clone(&cluster.message_buffer);
             let callback_registry = Rc::clone(&cluster.callback_registry);
+            let cluster_size = inner.cluster.nodes.len() as u64;
 
             for node in &mut inner.cluster.nodes {
                 let message_buffer = Rc::clone(&message_buffer);
                 let callback_registry = Rc::clone(&callback_registry);
 
+                let node_id = u64::from(node.id);
+                
                 node.channel.set_message_callback(move |msg| {
                     let timestamp = window()
                         .and_then(|w| w.performance())
@@ -89,22 +92,48 @@ impl WasmCluster {
                         ProtoMessageType::RequestVoteResponse => "RequestVoteResponse",
                     };
 
-                    let cluster_msg = ClusterMessage::new(
-                        msg.from,
-                        msg.to,
-                        msg_type.to_string(),
-                        msg.term,
-                        timestamp,
-                    );
+                    // Handle broadcast messages (to == 0) by creating individual messages for each recipient
+                    if msg.to == 0 {
+                        // Broadcast message - create entries for all other nodes
+                        for recipient_id in 1..=cluster_size {
+                            if recipient_id != node_id {
+                                let cluster_msg = ClusterMessage::new(
+                                    msg.from,
+                                    recipient_id,
+                                    msg_type.to_string(),
+                                    msg.term,
+                                    timestamp,
+                                );
+                                message_buffer.borrow_mut().push(cluster_msg.clone());
 
-                    message_buffer.borrow_mut().push(cluster_msg.clone());
-
-                    // Notify callbacks
-                    for callback in callback_registry.borrow().iter() {
-                        let _ = callback.call1(
-                            &JsValue::NULL,
-                            &JsValue::from_str(&format!("message:{}:{}:{}", msg.from, msg.to, msg_type)),
+                                // Notify callbacks
+                                for callback in callback_registry.borrow().iter() {
+                                    let _ = callback.call1(
+                                        &JsValue::NULL,
+                                        &JsValue::from_str(&format!("message:{}:{}:{}", msg.from, recipient_id, msg_type)),
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Unicast message
+                        let cluster_msg = ClusterMessage::new(
+                            msg.from,
+                            msg.to,
+                            msg_type.to_string(),
+                            msg.term,
+                            timestamp,
                         );
+
+                        message_buffer.borrow_mut().push(cluster_msg.clone());
+
+                        // Notify callbacks
+                        for callback in callback_registry.borrow().iter() {
+                            let _ = callback.call1(
+                                &JsValue::NULL,
+                                &JsValue::from_str(&format!("message:{}:{}:{}", msg.from, msg.to, msg_type)),
+                            );
+                        }
                     }
                 });
             }
