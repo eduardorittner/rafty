@@ -167,11 +167,15 @@ impl WasmCluster {
 
     /// Sets the tick interval in milliseconds
     pub fn set_tick_rate(&self, rate_ms: u64) {
-        let mut inner = self.inner.borrow_mut();
-        inner.cluster.tick_rate_ms = rate_ms;
+        // Get the running state first, then release the borrow
+        let needs_restart = {
+            let mut inner = self.inner.borrow_mut();
+            inner.cluster.tick_rate_ms = rate_ms;
+            inner.is_running
+        }; // Borrow is dropped here
 
         // Restart timer if running
-        if inner.is_running {
+        if needs_restart {
             self.stop();
             self.start_with_timer();
         }
