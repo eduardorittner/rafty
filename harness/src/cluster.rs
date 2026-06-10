@@ -217,10 +217,15 @@ impl Cluster {
         }
 
         // Then, step all active nodes to process incoming messages
+        // Ignore messages from paused nodes (they're "dead" and their messages should be discarded)
         for node in &mut self.nodes {
             if !self.paused_nodes.contains(&u64::from(node.id)) {
-                if let Ok(msg) = node.channel.recv.try_recv() {
-                    node.step(msg.into()).unwrap();
+                // Process messages, but discard any from paused/crashed nodes
+                while let Ok(msg) = node.channel.recv.try_recv() {
+                    // Only process message if sender is not paused
+                    if !self.paused_nodes.contains(&msg.from) {
+                        node.step(msg.into()).unwrap();
+                    }
                 }
             }
         }
