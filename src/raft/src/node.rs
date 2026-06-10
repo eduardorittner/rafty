@@ -318,16 +318,21 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             return;
         }
 
-        // Update follower progress (similar to AppendResponse)
+        // Check if we need to replicate entries to this follower
         let follower_id = ValidNodeId::new(resp.from);
         if let Some(follower_id) = follower_id {
-            if let Role::Leader(ref mut state) = self.role {
+            let last_index = self.storage.store.last_index();
+            let mut needs_replication = false;
+            if let Role::Leader(ref state) = self.role {
                 if state.follower_progress.contains_key(follower_id) {
-                    let progress = &mut state.follower_progress[follower_id];
-                    // Heartbeat response indicates the follower is alive and in sync
-                    let match_idx = self.storage.store.last_index();
-                    progress.update_on_success(match_idx);
+                    let progress = &state.follower_progress[follower_id];
+                    if last_index >= progress.next_index {
+                        needs_replication = true;
+                    }
                 }
+            }
+            if needs_replication {
+                self.send_append_entries_to(follower_id.into(), last_index);
             }
         }
     }
@@ -342,7 +347,22 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
             }
         }
 
-        let vote = if req.candidate_term < self.term {
+        let last_index = self.storage.store.last_index();
+        let last_term = if last_index > 0 {
+            self.storage.store.term(last_index).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let log_ok = if req.last_term > last_term {
+            true
+        } else if req.last_term == last_term {
+            req.last_index >= last_index
+        } else {
+            false
+        };
+
+        let vote = if req.candidate_term < self.term || !log_ok {
             INVALID_ID.into()
         } else {
             match self.voted_for.0 {
@@ -550,6 +570,8 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
 
         // Update follower progress
         let follower_id = ValidNodeId::new(resp.from);
+        let mut retry_replication = false;
+        let last_index = self.storage.store.last_index();
         if let Some(follower_id) = follower_id {
             if let Role::Leader(ref mut state) = self.role {
                 if state.follower_progress.contains_key(follower_id) {
@@ -561,8 +583,15 @@ impl<Store: Storage, Chan: Channel> Node<Store, Chan> {
                     } else {
                         // Decrement next_index to retry with earlier entries
                         progress.decrement_next_index();
+                        retry_replication = true;
                     }
                 }
+            }
+        }
+
+        if retry_replication {
+            if let Some(follower_id) = follower_id {
+                self.send_append_entries_to(follower_id.into(), last_index);
             }
         }
 

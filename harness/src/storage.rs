@@ -51,12 +51,18 @@ impl Storage for MemStorage {
     fn append(&mut self, entries: Vec<Entry>) -> Result<()> {
         for entry in entries {
             let idx = (entry.index - 1) as usize;
-            // Handle overwrites: if entry index exists, replace it
+            // Handle overwrites: if entry index exists, check for conflict
             // If entry index is at the end, push it
             // If entry index is beyond the end, this is an error (entries must be contiguous)
             if idx < self.log.len() {
-                // Overwrite existing entry
-                self.log[idx] = entry;
+                if self.log[idx].term != entry.term {
+                    // Conflicting entry! Truncate log starting from this index
+                    self.log.truncate(idx);
+                    self.log.push(entry);
+                } else {
+                    // Identical entry, just keep/overwrite it
+                    self.log[idx] = entry;
+                }
             } else if idx == self.log.len() {
                 // Append new entry
                 self.log.push(entry);
