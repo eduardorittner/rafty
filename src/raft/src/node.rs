@@ -149,6 +149,29 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
         node
     }
 
+    /// Propose a new entry to the cluster.
+    /// If this node is the leader, it appends the entry to its storage and broadcasts it.
+    /// Returns true if the node is leader and entry was proposed, false otherwise.
+    pub fn propose_entry(&mut self, data: Vec<u8>) -> bool {
+        if !matches!(self.role, Role::Leader(_)) {
+            return false;
+        }
+
+        let next_index = self.storage.store.last_index() + 1;
+        let entry = Entry {
+            term: self.term,
+            index: next_index,
+            data,
+        };
+
+        if self.storage.store.append(vec![entry]).is_err() {
+            return false;
+        }
+
+        self.replicate_to_followers();
+        true
+    }
+
     /// Perform a state transition based on the given message.
     pub fn step(&mut self, msg: Message) -> Result<()> {
         match msg {
