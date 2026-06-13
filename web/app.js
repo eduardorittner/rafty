@@ -66,6 +66,27 @@ function createNodeGraphics(total = 5) {
 		group.setAttribute('class', 'node-group node-offline');
 		group.setAttribute('transform', `translate(${coords.x}, ${coords.y})`);
 
+		// Click handler to manually tick node when cluster is paused
+		group.addEventListener('click', () => {
+			if (cluster && cluster.is_cluster_paused()) {
+				// Add tick flash effect
+				group.classList.add('node-ticked');
+				setTimeout(() => {
+					group.classList.remove('node-ticked');
+				}, 400);
+
+				cluster.tick_node(BigInt(i));
+				const state = cluster.get_state();
+				renderUI(state);
+				updateLogUI(state);
+			}
+		});
+
+		// Dynamic tooltip using SVG title
+		const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+		title.textContent = 'Click to manually tick node (when cluster is paused)';
+		group.appendChild(title);
+
 		// Outer glowing circle
 		const outer = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
 		outer.setAttribute('r', '50');
@@ -102,6 +123,35 @@ function createNodeGraphics(total = 5) {
 		termText.setAttribute('id', `node-term-val-${i}`);
 		termText.textContent = 'T: 0';
 		group.appendChild(termText);
+
+		// Pending messages badge group
+		const badgeGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+		badgeGroup.setAttribute('id', `node-badge-group-${i}`);
+		badgeGroup.setAttribute('style', 'display: none;');
+
+		const badgeBg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+		badgeBg.setAttribute('cx', '34');
+		badgeBg.setAttribute('cy', '-34');
+		badgeBg.setAttribute('r', '10');
+		badgeBg.setAttribute('fill', '#6366f1');
+		badgeBg.setAttribute('stroke', '#0b0b14');
+		badgeBg.setAttribute('stroke-width', '2');
+		badgeGroup.appendChild(badgeBg);
+
+		const badgeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+		badgeText.setAttribute('x', '34');
+		badgeText.setAttribute('y', '-34');
+		badgeText.setAttribute('class', 'node-badge-text');
+		badgeText.setAttribute('id', `node-badge-text-val-${i}`);
+		badgeText.setAttribute('fill', '#ffffff');
+		badgeText.setAttribute('font-size', '10px');
+		badgeText.setAttribute('font-weight', '700');
+		badgeText.setAttribute('text-anchor', 'middle');
+		badgeText.setAttribute('dominant-baseline', 'central');
+		badgeText.textContent = '0';
+		badgeGroup.appendChild(badgeText);
+
+		group.appendChild(badgeGroup);
 
 		nodesGroup.appendChild(group);
 	}
@@ -206,6 +256,12 @@ function toggleClusterPause() {
 function renderUI(data) {
 	if (!data || !data.nodes) return;
 
+	// Toggle class 'cluster-paused' on canvas when cluster is paused
+	const canvas = document.getElementById('svg-canvas');
+	if (canvas && cluster) {
+		canvas.classList.toggle('cluster-paused', cluster.is_cluster_paused());
+	}
+
 	// Update dynamic tick rate UI if user is not currently interacting with the slider
 	const slider = document.getElementById('tick-rate-slider');
 	const valLabel = document.getElementById('tick-rate-val');
@@ -223,6 +279,19 @@ function renderUI(data) {
 		const graphic = document.getElementById(`node-graphic-${id}`);
 		const roleText = document.getElementById(`node-role-val-${id}`);
 		const termText = document.getElementById(`node-term-val-${id}`);
+
+		// Update pending messages badge
+		const badgeGroup = document.getElementById(`node-badge-group-${id}`);
+		const badgeVal = document.getElementById(`node-badge-text-val-${id}`);
+		if (badgeGroup && badgeVal) {
+			const count = node.pending_messages_count || 0;
+			if (count > 0) {
+				badgeVal.textContent = count;
+				badgeGroup.style.display = 'block';
+			} else {
+				badgeGroup.style.display = 'none';
+			}
+		}
 
 		if (graphic) {
 			let roleClass = 'node-offline';
@@ -341,7 +410,7 @@ function renderUI(data) {
 			if (msg.timestamp > lastEventTimestamp || messageLogOpen) {
 				const details = `${msg.msg_type} (T:${msg.term})`;
 				if (msg.from !== 0 && msg.to !== 0) {
-					if (messageLogOpen) {
+					if (messageLogOpen || (cluster && cluster.is_cluster_paused())) {
 						animatePacket(msg.from, msg.to, msg.msg_type);
 					}
 					addLog(`Node ${msg.from} → Node ${msg.to}: ${details}`, 'sent');

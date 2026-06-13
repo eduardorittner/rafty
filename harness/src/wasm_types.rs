@@ -13,6 +13,7 @@ pub struct NodeState {
     paused: bool,        // Whether node is paused/killed
     last_log_index: u64,
     committed_index: u64,
+    pending_messages_count: u64,
 }
 
 #[wasm_bindgen]
@@ -27,6 +28,7 @@ impl NodeState {
         paused: bool,
         last_log_index: u64,
         committed_index: u64,
+        pending_messages_count: u64,
     ) -> Self {
         Self {
             id,
@@ -37,6 +39,7 @@ impl NodeState {
             paused,
             last_log_index,
             committed_index,
+            pending_messages_count,
         }
     }
 
@@ -78,6 +81,11 @@ impl NodeState {
     #[wasm_bindgen(getter)]
     pub fn committed_index(&self) -> u64 {
         self.committed_index
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn pending_messages_count(&self) -> u64 {
+        self.pending_messages_count
     }
 }
 

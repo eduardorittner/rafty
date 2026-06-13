@@ -240,6 +240,25 @@ impl<Rng: RngProvider> Cluster<Rng> {
         }
     }
 
+    /// Tick a single node and process its incoming messages
+    pub fn tick_single_node(&mut self, node_id: u64) {
+        // Only tick and process if the node is not crashed/paused
+        if !self.paused_nodes.contains(&node_id) {
+            // First tick the node
+            if let Some(node) = self.nodes.iter_mut().find(|n| u64::from(n.id) == node_id) {
+                node.tick();
+            }
+            // Then step the node for all pending messages in its inbox
+            if let Some(node) = self.nodes.iter_mut().find(|n| u64::from(n.id) == node_id) {
+                while let Ok(msg) = node.channel.recv.try_recv() {
+                    if !self.paused_nodes.contains(&msg.from) {
+                        node.step(msg.into()).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
     /// Register a state change callback
     pub fn add_state_callback<F>(&mut self, callback: F)
     where

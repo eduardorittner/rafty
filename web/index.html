@@ -324,6 +324,51 @@
 			transition: all 0.3s;
 		}
 
+		/* Visual indication that the node can be manually ticked when cluster is paused */
+		.cluster-paused .node-group:hover .node-outer-glow {
+			stroke: #818cf8;
+			stroke-dasharray: 6 3;
+			animation: march 1s linear infinite;
+			filter: drop-shadow(0 0 12px rgba(129, 140, 248, 0.6));
+		}
+
+		.cluster-paused .node-group:hover .node-body {
+			fill: #1e1e32;
+			stroke: #818cf8;
+		}
+
+		@keyframes march {
+			to {
+				stroke-dashoffset: -18;
+			}
+		}
+
+		@keyframes tick-flash-body {
+			0% {
+				fill: rgba(99, 102, 241, 0.5);
+				stroke: #818cf8;
+				stroke-width: 4px;
+			}
+			100% {
+				fill: #151525;
+				stroke: rgba(255, 255, 255, 0.1);
+				stroke-width: 2px;
+			}
+		}
+
+		.node-group.node-ticked .node-body {
+			animation: tick-flash-body 0.4s ease-out;
+		}
+
+		[id^="node-badge-group-"] {
+			pointer-events: none;
+		}
+
+		.node-badge-text {
+			font-family: 'Outfit', sans-serif;
+			pointer-events: none;
+		}
+
 		.node-outer-glow {
 			transition: all 0.5s ease;
 		}

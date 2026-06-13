@@ -228,3 +228,54 @@ fn election_fails_with_total_network_partition() {
         assert!(!matches!(node.role, Role::Leader(_)), "Node {} became leader despite 100% network failure", node.id);
     }
 }
+
+#[test]
+fn manual_tick_while_paused() {
+    use harness::NO_FAULT;
+
+    // 3-node cluster
+    let config = Cluster::initial_config(3);
+    let mut cluster = Cluster::from_config(config, NO_FAULT);
+
+    // Let the cluster run for a bit to establish sanity (e.g. 1 tick)
+    cluster.tick_active();
+
+    // Now simulate pausing the cluster by NOT calling tick_active().
+    // Instead, we manually tick only Node 1.
+    // Node 1's timer will increment, and since it hasn't heard from a leader (no leader elected yet),
+    // if we tick it enough times (say 25 times), Node 1 will timeout and start an election.
+    // This will cause it to send RequestVote messages to Node 2 and 3.
+    for _ in 0..25 {
+        cluster.tick_single_node(1);
+    }
+
+    // Node 2 and Node 3 are not ticked or stepped (as the cluster is paused).
+    // Let's assert that Node 1 transitioned to Candidate.
+    assert!(
+        matches!(cluster.get(1).role, Role::Candidate(_)),
+        "Node 1 should become candidate after manual ticks"
+    );
+
+    // Assert that Node 2 and 3 have not processed the RequestVote messages yet (they are not ticked/stepped).
+    // They should still be in Follower state and not voted for Node 1.
+    assert!(matches!(cluster.get(2).role, Role::Follower(_)));
+    assert!(matches!(cluster.get(3).role, Role::Follower(_)));
+    assert_eq!(cluster.get(2).voted_for, raft::NodeId::from(0));
+    assert_eq!(cluster.get(3).voted_for, raft::NodeId::from(0));
+
+    // Now, "unpause" the cluster by calling tick_active().
+    // Node 2 and 3 will now process the incoming messages (the stored RequestVote messages).
+    cluster.tick_active();
+
+    // Node 2 and 3 should have received the RequestVotes, voted for Node 1, and sent RequestVoteResponses back.
+    // Since Node 1 receives these responses, Node 1 should become the Leader!
+    // Let's call tick_active() a couple more times to make sure everything propagates.
+    for _ in 0..2 {
+        cluster.tick_active();
+    }
+
+    assert!(
+        matches!(cluster.get(1).role, Role::Leader(_)),
+        "Node 1 should have become leader after cluster unpaused and messages were processed"
+    );
+}

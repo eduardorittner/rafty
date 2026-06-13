@@ -45,6 +45,7 @@ pub struct WasmCluster {
     callback_registry: Rc<RefCell<Vec<Function>>>,
     message_buffer: Rc<RefCell<Vec<ClusterMessage>>>,
     timer_id: RefCell<Option<i32>>,
+    pending_messages: Rc<RefCell<std::collections::HashMap<u64, u64>>>,
 }
 
 #[wasm_bindgen]
@@ -61,6 +62,7 @@ impl WasmCluster {
             callback_registry: Rc::new(RefCell::new(Vec::new())),
             message_buffer: Rc::new(RefCell::new(Vec::new())),
             timer_id: RefCell::new(None),
+            pending_messages: Rc::new(RefCell::new(std::collections::HashMap::new())),
         };
 
         // Set up message interception
@@ -68,11 +70,15 @@ impl WasmCluster {
             let mut inner = cluster.inner.borrow_mut();
             let message_buffer = Rc::clone(&cluster.message_buffer);
             let callback_registry = Rc::clone(&cluster.callback_registry);
+            let pending_messages = Rc::clone(&cluster.pending_messages);
+            let inner_clone = Rc::clone(&cluster.inner);
             let cluster_size = inner.cluster.nodes.len() as u64;
 
             for node in &mut inner.cluster.nodes {
                 let message_buffer = Rc::clone(&message_buffer);
                 let callback_registry = Rc::clone(&callback_registry);
+                let pending_messages = Rc::clone(&pending_messages);
+                let inner_clone = Rc::clone(&inner_clone);
 
                 let node_id = u64::from(node.id);
 
@@ -91,6 +97,8 @@ impl WasmCluster {
                         ProtoMessageType::RequestVoteResponse => "RequestVoteResponse",
                     };
 
+                    let is_paused = inner_clone.borrow().is_paused;
+
                     // Handle broadcast messages (to == 0) by creating individual messages for each recipient
                     if msg.to == 0 {
                         // Broadcast message - create entries for all other nodes
@@ -105,6 +113,9 @@ impl WasmCluster {
                                 );
                                 {
                                     message_buffer.borrow_mut().push(cluster_msg.clone());
+                                    if is_paused {
+                                        *pending_messages.borrow_mut().entry(recipient_id).or_default() += 1;
+                                    }
                                 }
 
                                 // Notify callbacks
@@ -131,6 +142,9 @@ impl WasmCluster {
 
                         {
                             message_buffer.borrow_mut().push(cluster_msg.clone());
+                            if is_paused {
+                                *pending_messages.borrow_mut().entry(msg.to).or_default() += 1;
+                            }
                         }
 
                         // Notify callbacks
@@ -166,6 +180,7 @@ impl WasmCluster {
                 callback_registry: Rc::clone(&self.callback_registry),
                 message_buffer: Rc::clone(&self.message_buffer),
                 timer_id: RefCell::new(None),
+                pending_messages: Rc::clone(&self.pending_messages),
             };
 
             let callback = Closure::<dyn Fn()>::new(move || {
@@ -209,6 +224,18 @@ impl WasmCluster {
         }
     }
 
+    /// Performs a single tick for a specific node when the cluster is paused
+    pub fn tick_node(&self, node_id: u64) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            if inner.is_paused {
+                inner.cluster.tick_single_node(node_id);
+                self.pending_messages.borrow_mut().remove(&node_id);
+            }
+        } // Drop the borrow before calling notify_state_change
+        self.notify_state_change();
+    }
+
     /// Pauses the entire cluster (no new messages sent, but existing messages are preserved)
     pub fn pause_cluster(&self) {
         let mut inner = self.inner.borrow_mut();
@@ -217,14 +244,23 @@ impl WasmCluster {
 
     /// Resumes the cluster
     pub fn resume_cluster(&self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.is_paused = false;
+        {
+            let mut inner = self.inner.borrow_mut();
+            inner.is_paused = false;
+        }
+        self.pending_messages.borrow_mut().clear();
     }
 
     /// Toggles cluster paused state
     pub fn toggle_cluster_paused(&self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.is_paused = !inner.is_paused;
+        let is_unpausing = {
+            let mut inner = self.inner.borrow_mut();
+            inner.is_paused = !inner.is_paused;
+            !inner.is_paused
+        };
+        if is_unpausing {
+            self.pending_messages.borrow_mut().clear();
+        }
     }
 
     /// Gets cluster paused state
@@ -302,6 +338,7 @@ impl WasmCluster {
                 }
             };
 
+            let pending_count = *self.pending_messages.borrow().get(&node_id).unwrap_or(&0);
             let node_state = NodeState::new(
                 node_id,
                 role_str,
@@ -311,6 +348,7 @@ impl WasmCluster {
                 is_paused,
                 node.storage.store.last_index(),
                 node.storage.committed,
+                pending_count,
             );
 
             let js_value = serde_wasm_bindgen::to_value(&node_state).unwrap_or(JsValue::NULL);
@@ -376,6 +414,7 @@ impl WasmCluster {
             inner.cluster = new_cluster;
         }
         self.message_buffer.borrow_mut().clear();
+        self.pending_messages.borrow_mut().clear();
         self.notify_state_change();
     }
 
@@ -529,6 +568,7 @@ impl WasmCluster {
                 callback_registry: Rc::clone(&self.callback_registry),
                 message_buffer: Rc::clone(&self.message_buffer),
                 timer_id: RefCell::new(None),
+                pending_messages: Rc::clone(&self.pending_messages),
             };
 
             let callback = Closure::once(move || {
