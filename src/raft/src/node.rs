@@ -6,10 +6,10 @@ use crate::node_id::{INVALID_ID, NodeId, ValidNodeId};
 use crate::node_map::NodeMap;
 use crate::progress::FollowerProgress;
 use crate::quorum::{Quorum, Vote};
+use crate::rng::RngProvider;
 use crate::storage::Storage;
 use proto::proto::*;
 use tracing::{debug, error, info};
-use crate::rng::RngProvider;
 
 #[derive(Debug)]
 pub struct Node<Store: Storage, Chan: Channel, Rng: RngProvider> {
@@ -132,7 +132,13 @@ pub struct LeaderState {
 }
 
 impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
-    pub fn new(id: ValidNodeId, storage: Store, channel: Chan, rng: Rng, config: InitialConfig) -> Self {
+    pub fn new(
+        id: ValidNodeId,
+        storage: Store,
+        channel: Chan,
+        rng: Rng,
+        config: InitialConfig,
+    ) -> Self {
         let mut node = Self {
             id,
             voted_for: INVALID_ID,
@@ -206,15 +212,6 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
                 if state.election_timeout_passed(self.election_timeout) {
                     let _ = self.step(Message::StartCampaign);
                     return;
-                }
-
-                if state.votes.has_majority_for() {
-                    let last_index = self.storage.store.last_index();
-                    self.role = self.role.to_owned().become_leader(
-                        self.config.cluster_size,
-                        self.id,
-                        last_index,
-                    );
                 }
             }
             Role::Leader(LeaderState {
@@ -442,6 +439,8 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
                             self.id,
                             last_index,
                         );
+
+                        self.leader_id = self.id.into();
                     }
                     crate::quorum::ElectionState::Lost => {
                         self.role = self.role.to_owned().become_follower()
@@ -503,21 +502,6 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
             })
             .into(),
         );
-    }
-
-    fn become_leader(&mut self) {
-        let last_index = self.storage.store.last_index();
-        self.role =
-            self.role
-                .to_owned()
-                .become_leader(self.config.cluster_size, self.id, last_index);
-
-        self.start_term();
-        self.leader_id = self.id.into();
-        info!("Node {:?} became leader at term {}", self.id, self.term);
-
-        // Immediately replicate to all followers
-        self.replicate_to_followers();
     }
 
     /// Process incoming AppendEntries RPC as a follower.
@@ -660,7 +644,7 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
                         self.id, current_committed, majority_index
                     );
                     self.storage.committed = majority_index;
-                    
+
                     // After advancing commit index, broadcast AppendEntries to followers
                     // to notify them of the new commit index
                     self.replicate_to_followers();
