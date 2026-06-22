@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raft Node Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: #151d30;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --primary: #3b82f6;
+            --primary-glow: rgba(59, 130, 246, 0.15);
+            --success: #10b981;
+            --success-glow: rgba(16, 185, 129, 0.15);
+            --warning: #f59e0b;
+            --warning-glow: rgba(245, 158, 11, 0.15);
+            --border: #223049;
+            --terminal-bg: #070a13;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 24px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin: 0;
+            background: linear-gradient(135deg, #60a5fa, #3b82f6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 8px 16px;
+            border-radius: 9999px;
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            box-shadow: 0 0 15px currentColor;
+            transition: all 0.3s ease;
+        }
+
+        .badge-leader {
+            background-color: var(--success-glow);
+            color: var(--success);
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.2);
+        }
+
+        .badge-candidate {
+            background-color: var(--warning-glow);
+            color: var(--warning);
+            box-shadow: 0 0 20px rgba(245, 158, 11, 0.2);
+        }
+
+        .badge-follower {
+            background-color: var(--primary-glow);
+            color: var(--primary);
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.2);
+        }
+
+        .pulse {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: currentColor;
+            margin-right: 8px;
+            animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+        }
+
+        @keyframes ping {
+            75%, 100% {
+                transform: scale(2);
+                opacity: 0;
+            }
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 20px;
+            margin-bottom: 32px;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            transition: transform 0.2s, border-color 0.2s;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            border-color: #3b82f680;
+        }
+
+        .card-title {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            letter-spacing: 0.05em;
+            margin-bottom: 8px;
+        }
+
+        .card-value {
+            font-size: 32px;
+            font-weight: 700;
+        }
+
+        .panel-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 32px;
+        }
+
+        @media (min-width: 900px) {
+            .panel-grid {
+                grid-template-columns: 3fr 2fr;
+            }
+        }
+
+        .panel {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 12px;
+        }
+
+        .panel-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .form-propose {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            background-color: var(--bg-color);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            color: var(--text-main);
+            font-family: inherit;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--primary);
+        }
+
+        button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 12px 24px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            background-color: #2563eb;
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.4);
+        }
+
+        .table-container {
+            overflow-x: auto;
+            max-height: 350px;
+            overflow-y: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 14px;
+        }
+
+        th, td {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            color: var(--text-muted);
+            font-weight: 600;
+            background-color: rgba(255, 255, 255, 0.02);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .entry-index {
+            font-weight: 700;
+            color: var(--text-muted);
+        }
+
+        .entry-term {
+            font-family: 'Fira Code', monospace;
+            color: var(--warning);
+        }
+
+        .entry-data {
+            font-family: 'Fira Code', monospace;
+        }
+
+        .terminal {
+            background-color: var(--terminal-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            font-family: 'Fira Code', monospace;
+            font-size: 13px;
+            padding: 16px;
+            overflow-y: auto;
+            height: 400px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.8);
+        }
+
+        .log-line {
+            line-height: 1.5;
+            white-space: pre-wrap;
+        }
+
+        .log-basic { color: #f3f4f6; }
+        .log-info { color: #60a5fa; }
+        .log-debug { color: #6b7280; }
+
+        /* Custom scrollbars */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--bg-color);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #3b82f660;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1 id="node-title">Raft Node Dashboard</h1>
+            </div>
+            <div id="node-badge" class="badge">
+                <span class="pulse"></span>
+                <span id="node-role">Loading...</span>
+            </div>
+        </header>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-title">Node ID</div>
+                <div class="card-value" id="node-id">-</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Current Term</div>
+                <div class="card-value" id="node-term">-</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Leader ID</div>
+                <div class="card-value" id="node-leader">-</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Commit Index</div>
+                <div class="card-value" id="node-commit">-</div>
+            </div>
+        </div>
+
+        <div class="panel-grid">
+            <div class="panel">
+                <div class="panel-header">
+                    <h2 class="panel-title">Console Output</h2>
+                </div>
+                <div class="terminal" id="log-terminal"></div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h2 class="panel-title">Propose Log Entry</h2>
+                </div>
+                <form class="form-propose" id="propose-form" onsubmit="proposeEntry(event)">
+                    <input type="text" id="propose-input" placeholder="Enter string data..." required autocomplete="off">
+                    <button type="submit">Propose</button>
+                </form>
+                <div style="margin-bottom: 24px;" id="propose-status"></div>
+
+                <div class="panel-header" style="margin-top: 12px;">
+                    <h2 class="panel-title">Replicated Log</h2>
+                </div>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Index</th>
+                                <th>Term</th>
+                                <th>Data</th>
+                            </tr>
+                        </thead>
+                        <tbody id="log-body">
+                            <tr>
+                                <td colspan="3" style="text-align: center; color: var(--text-muted)">No entries replicated yet.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let lastLogsLength = 0;
+
+        async function updateStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+
+                document.getElementById('node-title').innerText = `Raft Node ${data.id}`;
+                document.getElementById('node-id').innerText = data.id;
+                document.getElementById('node-term').innerText = data.term;
+                document.getElementById('node-leader').innerText = data.leader_id === 0 ? "None" : `Node ${data.leader_id}`;
+                document.getElementById('node-commit').innerText = data.commit_index;
+
+                const badge = document.getElementById('node-badge');
+                const roleSpan = document.getElementById('node-role');
+                const roleLower = data.role.toLowerCase();
+                
+                badge.className = `badge badge-${roleLower}`;
+                roleSpan.innerText = data.role;
+
+                const logBody = document.getElementById('log-body');
+                if (data.log_entries && data.log_entries.length > 0) {
+                    logBody.innerHTML = data.log_entries.map(entry => `
+                        <tr>
+                            <td class="entry-index">${entry.index}</td>
+                            <td class="entry-term">${entry.term}</td>
+                            <td class="entry-data">${escapeHtml(entry.data)}</td>
+                        </tr>
+                    `).join('');
+                } else {
+                    logBody.innerHTML = `<tr><td colspan="3" style="text-align: center; color: var(--text-muted)">No entries replicated yet.</td></tr>`;
+                }
+
+                const terminal = document.getElementById('log-terminal');
+                if (data.logs && data.logs.length !== lastLogsLength) {
+                    const shouldScroll = terminal.scrollHeight - terminal.scrollTop <= terminal.clientHeight + 60;
+                    
+                    terminal.innerHTML = data.logs.map(line => {
+                        let colorClass = 'log-basic';
+                        if (line.includes('[INFO]')) colorClass = 'log-info';
+                        if (line.includes('[DEBUG]')) colorClass = 'log-debug';
+                        return `<div class="log-line ${colorClass}">${escapeHtml(line)}</div>`;
+                    }).join('');
+                    
+                    lastLogsLength = data.logs.length;
+                    
+                    if (shouldScroll) {
+                        terminal.scrollTop = terminal.scrollHeight;
+                    }
+                }
+
+            } catch (err) {
+                console.error('Error fetching status:', err);
+            }
+        }
+
+        async function proposeEntry(event) {
+            event.preventDefault();
+            const input = document.getElementById('propose-input');
+            const statusDiv = document.getElementById('propose-status');
+            const data = input.value;
+
+            statusDiv.innerHTML = '<span style="color: var(--text-muted)">Submitting proposal...</span>';
+
+            try {
+                const response = await fetch('/propose', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ data: data })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    statusDiv.innerHTML = '<span style="color: var(--success)">Proposal sent! If node is leader, it will replicate.</span>';
+                    input.value = '';
+                } else {
+                    statusDiv.innerHTML = `<span style="color: var(--warning)">Error: ${result.error || 'Failed'}</span>`;
+                }
+            } catch (err) {
+                statusDiv.innerHTML = `<span style="color: var(--warning)">Error connecting: ${err.message}</span>`;
+            }
+
+            setTimeout(() => {
+                statusDiv.innerHTML = '';
+            }, 5000);
+        }
+
+        function escapeHtml(unsafe) {
+            return unsafe
+                 .replace(/&/g, "&amp;")
+                 .replace(/</g, "&lt;")
+                 .replace(/>/g, "&gt;")
+                 .replace(/"/g, "&quot;")
+                 .replace(/'/g, "&#039;");
+        }
+
+        setInterval(updateStatus, 300);
+        updateStatus();
+    </script>
+</body>
+</html>
