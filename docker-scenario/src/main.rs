@@ -23,6 +23,20 @@ enum EventLevel {
     Debug,
 }
 
+fn get_timestamp() -> String {
+    let now = std::time::SystemTime::now();
+    if let Ok(duration) = now.duration_since(std::time::UNIX_EPOCH) {
+        let secs = duration.as_secs();
+        let millis = duration.subsec_millis();
+        let hours = (secs / 3600) % 24;
+        let minutes = (secs / 60) % 60;
+        let seconds = secs % 60;
+        format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis)
+    } else {
+        "00:00:00.000".to_string()
+    }
+}
+
 #[derive(Clone)]
 struct Logger {
     node_id: u64,
@@ -40,7 +54,8 @@ impl Logger {
     }
 
     fn log(&self, msg: String) {
-        let formatted = format!("[Node {}] {}", self.node_id, msg);
+        let timestamp = get_timestamp();
+        let formatted = format!("[{}] [Node {}] {}", timestamp, self.node_id, msg);
         println!("{}", formatted);
 
         let mut logs = self.logs.lock().unwrap();
