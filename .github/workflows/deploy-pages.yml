@@ -1,0 +1,206 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'RELATORIO.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pandoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc
+
+      - name: Convert Markdown to HTML
+        run: |
+          pandoc RELATORIO.md \
+            -o index.html \
+            --standalone \
+            --metadata title="Relatório Técnico: Implementação do Protocolo Raft" \
+            --css style.css \
+            --toc \
+            --toc-depth=3
+
+      - name: Create CSS file
+        run: |
+          cat > style.css << 'EOF'
+          :root {
+            --primary-color: #0366d6;
+            --text-color: #24292e;
+            --bg-color: #ffffff;
+            --code-bg: #f6f8fa;
+            --border-color: #eaecef;
+          }
+
+          * {
+            box-sizing: border-box;
+          }
+
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-color);
+            background: var(--bg-color);
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 20px;
+          }
+
+          h1, h2, h3, h4, h5, h6 {
+            margin-top: 24px;
+            margin-bottom: 16px;
+            font-weight: 600;
+            line-height: 1.25;
+          }
+
+          h1 {
+            font-size: 2em;
+            padding-bottom: 0.3em;
+            border-bottom: 1px solid var(--border-color);
+          }
+
+          h2 {
+            font-size: 1.5em;
+            padding-bottom: 0.3em;
+            border-bottom: 1px solid var(--border-color);
+          }
+
+          h3 { font-size: 1.25em; }
+          h4 { font-size: 1em; }
+
+          a {
+            color: var(--primary-color);
+            text-decoration: none;
+          }
+
+          a:hover {
+            text-decoration: underline;
+          }
+
+          code {
+            padding: 0.2em 0.4em;
+            margin: 0;
+            font-size: 85%;
+            background-color: var(--code-bg);
+            border-radius: 3px;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+          }
+
+          pre {
+            padding: 16px;
+            overflow: auto;
+            font-size: 85%;
+            line-height: 1.45;
+            background-color: var(--code-bg);
+            border-radius: 3px;
+          }
+
+          pre code {
+            display: inline;
+            padding: 0;
+            margin: 0;
+            overflow: visible;
+            line-height: inherit;
+            word-wrap: normal;
+            background-color: transparent;
+            border: 0;
+          }
+
+          blockquote {
+            padding: 0 1em;
+            color: #6a737d;
+            border-left: 0.25em solid #dfe2e5;
+            margin: 0;
+          }
+
+          table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 16px 0;
+          }
+
+          th, td {
+            padding: 6px 13px;
+            border: 1px solid #dfe2e5;
+          }
+
+          tr:nth-child(2n) {
+            background-color: #f6f8fa;
+          }
+
+          ul, ol {
+            padding-left: 2em;
+          }
+
+          hr {
+            height: 0.25em;
+            padding: 0;
+            margin: 24px 0;
+            background-color: #e1e4e8;
+            border: 0;
+          }
+
+          #toc {
+            background: var(--code-bg);
+            padding: 20px;
+            border-radius: 5px;
+            margin: 20px 0;
+          }
+
+          #toc h2 {
+            margin-top: 0;
+            font-size: 1.2em;
+            border-bottom: none;
+          }
+
+          #toc ul {
+            list-style: none;
+          }
+
+          #toc li {
+            margin: 5px 0;
+          }
+
+          @media (max-width: 768px) {
+            body {
+              padding: 20px 10px;
+            }
+          }
+          EOF
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
