@@ -4,47 +4,30 @@
 
 ### 1.1 Contextualização sobre Algoritmos de Consenso Distribuído
 
-Em sistemas distribuídos, o problema do consenso consiste em fazer com que múltiplos processos (ou nós) concordem sobre um único valor ou sequência de valores, mesmo na presença de falhas parciais do sistema. Este problema é fundamental para a construção de sistemas tolerantes a falhas, como bancos de dados distribuídos, sistemas de coordenação e blockchains.
+No contexto de sistemas distribuídos, o problema do consenso tem como objetivo fazer com que nós independentes concordem sobre uma sequência de valores mesmo na presença de falhas parciais do sistema. Este problema é fundamental para a construção de sistemas tolerantes a falhas, como bancos de dados distribuídos, sistemas de coordenação e blockchains. No entanto, "falhas parciais" é um termo vago, e cada algoritmo de consenso distribuído possui garantias distintas, e protege contra tipos de falhas distintos.
+
+Protocolos Leader-based como Paxos e Raft garantem consistência sequencial e progresso, desde que a maioria dos nós esteja viva. Já os protocolos tolerantes a falhas bizantinas (como PBFT ou FBFT), isto é, são tolerantes a nós "maliciosos" que propositalmente enviam mensagens falsas. Os protocolos tolerantes a falhas bizantinas são substancialmente mais complexos ou computacionalmente caros, ou os dois, visto que num geral oferecem estritamente mais garantias que os protocolos não tolerantes a falhas bizantinas.
 
 ### 1.2 Algoritmos Anteriores ao Raft
 
-O algoritmo **Paxos**, proposto por Leslie Lamport em 1989, estabeleceu-se como o primeiro algoritmo de consenso prático e formalmente verificado. Apesar de sua correção matemática, o Paxos tornou-se notório por sua complexidade de compreensão e implementação. A descrição original do algoritmo utiliza uma abordagem baseada em "propostas" e "aceites" que, embora elegante do ponto de vista teórico, resulta em código difícil de depurar e manter na prática.
+O algoritmo **Paxos**, proposto por Leslie Lamport em 1989, estabeleceu-se como o primeiro algoritmo de consenso prático e formalmente verificado. Apesar de sua correção matemática, o Paxos tornou-se notório por sua complexidade de compreensão e implementação. A descrição original do algoritmo utiliza uma abordagem baseada em "propostas" e "aceites" que, embora elegante do ponto de vista teórico, resulta em código difícil de depurar e manter na prática[^1].
 
-Outras variações do Paxos, como **Multi-Paxos** (para consenso sobre sequências de valores) e **Fast Paxos** (para otimização de latência), herdaram esta complexidade, limitando sua adoção em sistemas práticos. A dificuldade de implementação correta levou muitos engenheiros a desenvolverem soluções ad-hoc, frequentemente incorretas ou incompletas.
+Paralelamente ao desenvolvimento do Paxos, **Viewstamped Replication** foi proposto por Oki e Liskov em 1988[^5]. Este algoritmo, desenvolvido independentemente do Paxos, compartilha conceitos fundamentais como a utilização de um nó primário (líder) para coordenar a replicação e a organização do tempo em "vistas" (views), análogas aos termos do Raft. Apesar de sua influência significativa no design de sistemas distribuídos modernos, o Viewstamped Replication recebeu menos atenção inicial na literatura acadêmica.
 
-### 1.3 O Diferencial do Raft
+Outras variações do Paxos, como **Multi-Paxos** (para consenso sobre sequências de valores)[^2] e **Fast Paxos** (para otimização de latência)[^3], herdaram esta complexidade, limitando sua adoção em sistemas práticos. A dificuldade de implementação correta levou muitos engenheiros a desenvolverem soluções ad-hoc, frequentemente incorretas ou incompletas.
 
-Publicado em 2014 por Diego Ongaro e John Ousterhout, o **Raft** foi projetado com um objetivo explícito: ser **compreensível**. Diferentemente do Paxos, que foi desenvolvido primeiramente como um exercício teórico, o Raft foi concebido desde o início como uma base prática para implementação de sistemas reais.
+Publicado em 2014 por Diego Ongaro e John Ousterhout, o **Raft** foi projetado com um objetivo explícito: ser **compreensível**. Diferentemente do Paxos, que foi desenvolvido primeiramente como um exercício teórico, o Raft foi concebido desde o início como uma base prática para implementação de sistemas reais. As principais inovações do Raft em termos de compreensibilidade incluem:
 
-As principais inovações do Raft em termos de compreensibilidade incluem:
-
-1. **Decomposição modular**: O algoritmo separa claramente as sub-tarefas de consenso em componentes distintos: eleição de líder, replicação de log e segurança.
-
+1. **Decomposição modular**: O algoritmo separa claramente as sub-tarefas de consenso em componentes distintos que podem ser discutidos, implementados e testados separadamente: eleição de líder, replicação do log e segurança.
 2. **Fortes garantias de estado**: O Raft impõe restrições mais fortes que o Paxos, limitando o espaço de estados possíveis e simplificando o raciocínio sobre o sistema.
-
 3. **Mudança de configuração segura**: O Raft introduz um mecanismo baseado em consenso para adicionar ou remover nós do cluster de forma segura, sem interromper o serviço.
+4. **Simplificação da lógica de consenso**: Dentro do Paxos, a lógica para garantir o consenso passa por várias etapas (Prepare, Promise, Accept e Accepted) que são coordenadas por 3 tipos de nós (proposers, acceptors e learners). Já no protocolo raft, o consenso é mais simples, o líder replica as mensagens para seguidores e considera que uma mensagem está replicada quando no mínimo metade dos nós tiverem confirmado seu processamento.
 
-4. **Terminologia intuitiva**: Conceitos como "líder", "seguidor" e "candidato" tornam o algoritmo mais acessível a desenvolvedores.
+## 2. O Algoritmo Raft
 
----
+O Raft é geralmente utilizado para replicar uma sequência de comandos, que podem ser executados independentemente por cada nó para chegar ao mesmo estado final, num modelo chamado de **máquinas de estado replicadas** (replicated state machines)[^6]. O algoritmo garante consistência sequencial (ou seja, uma única ordem global) para os comandos desde que a maioria dos nós esteja operacional, essas falhas podem incluir crashes, perda arbitrária de mensagens, redes falhas, dentre outras.
 
-## 2. Algoritmo Raft
-
-### 2.1 Visão Geral de Alto Nível
-
-O Raft gerencia um log replicado que contém uma sequência de comandos a serem executados pela máquina de estados de cada nó do cluster. O algoritmo garante que, mesmo na presença de falhas de nós (desde que a maioria permaneça operacional), todos os nós corretos concordem sobre a mesma sequência de comandos.
-
-### 2.2 Estados dos Nós
-
-Cada nó no Raft encontra-se em exatamente um dos três estados:
-
-- **Seguidor (Follower)**: Estado passivo onde o nó responde a requisições de líderes e candidatos. Seguidores não iniciam requisições RPC por conta própria.
-
-- **Candidato (Candidate)**: Estado transitório iniciado quando um seguidor não recebe comunicação do líder dentro de um período determinado. Candidatos solicitam votos de outros nós para tentar se tornar líderes.
-
-- **Líder (Leader)**: Estado ativo responsável por gerenciar toda a replicação de log. Em um cluster estável, há exatamente um líder. Todas as requisições de clientes são processadas pelo líder.
-
-### 2.3 Termos e Eleições
+Em um dado momento, cada nó encontra-se em exatamente em um de três estados: seguidor, candidato e líder. Seguidores são nós passivos que respondem a requisições de líderes e candidatos, e não iniciam requisições por conta própria. Seguidores que não recebem nenhum tipo de comunicação do líder dentro de um determinado período se tornam candidatos e passam a solicitar votos de outros nós para tentar se estabelecer como um novo líder. O líder é o nó responsável por gerenciar toda a replicação do log, em qualquer dado momento existe no máximo um líder válido (isto é, o líder com maior termo).
 
 O tempo no Raft é dividido em **termos**, que são números inteiros sequenciais que atuam como relógios lógicos. Cada termo começa com uma eleição:
 
@@ -59,27 +42,13 @@ O tempo no Raft é dividido em **termos**, que são números inteiros sequenciai
 
 4. Um candidato torna-se líder ao receber votos da **maioria** dos nós do cluster.
 
-5. Se múltiplos candidatos emergirem simultaneamente, nenhum receberá maioria, resultando em **empate**. Neste caso, novos timeouts de eleição (aleatórios) garantem que eventualmente um único candidato vença.
+5. No caso de nenhum candidato obter votos da maioria, novas eleições serão iniciadas até que eventualmente um líder seja eleito. Os timeouts de eleições possuem uma faixa possível de valores, e são definidos aleatoriamente por cada nó para minimizar a chance de empates.
 
-### 2.4 Replicação de Log
+Uma vez eleito, o líder é responsável por replicar entradas de log enviadas por clientes para os seguidores através de requisições `AppendEntries` RPC. Cada seguidor valida a consistência do log comparando o índice e termo da entrada anterior, adicionando as entradas novas no log local, consertando quaisquer inconsistências encontradas e enviando uma resposta ao líder. Quando o líder recebe a confirmação da maioria dos nós referente a uma entrada, ela é considera aplicada e o líder notifica os seguidores para aplicá-la a sua máquina de estado.
 
-Uma vez eleito, o líder é responsável por replicar entradas de log para os seguidores:
+Para manter sua autoridade, o líder envia periodicamente heartbeats (`AppendEntries` RPCs vazias) para todos os seguidores. Se um seguidor não recebe nenhuma mensagem dentro do timeout de eleição, ele assume que o líder falhou, se torna um candidato e inicia uma eleição.
 
-1. O líder recebe comandos de clientes e os adiciona ao seu log local.
-
-2. O líder envia **AppendEntries RPC** para todos os seguidores, contendo as novas entradas.
-
-3. Cada seguidor valida a consistência do log comparando o índice e termo da entrada anterior. Se consistente, a entrada é adicionada ao log local.
-
-4. Quando a maioria dos nós replicou uma entrada, ela é considerada **comitada** e o líder notifica os seguidores para aplicá-la às suas máquinas de estado.
-
-### 2.5 Heartbeats
-
-Para manter sua autoridade, o líder envia periodicamente **heartbeats** (AppendEntries RPCs vazias) para todos os seguidores. Se um seguidor não recebe heartbeat dentro do timeout de eleição, ele assume que o líder falhou e inicia nova eleição.
-
-### 2.6 Segurança do Raft
-
-O Raft garante várias propriedades de segurança críticas:
+A formulação matemática do Raft garante as seguintes propriedades críticas:
 
 - **Eleição com log completo**: Um candidato só pode ser eleito se seu log estiver pelo menos tão completo quanto o de qualquer outro nó.
 
@@ -91,21 +60,13 @@ O Raft garante várias propriedades de segurança críticas:
 
 ## 3. Detalhes da Implementação
 
-### 3.1 Arquitetura Geral
+A implementação foi feita utilizando a linguagem de programação Rust e está separada em 3 bibliotecas (também conhecidas como crates dentro do ecossistema Rust) pequenas e com um único foco cada:
 
-A implementação analisada, denominada **Rafty**, é desenvolvida em Rust com suporte a WebAssembly (WASM), permitindo execução tanto em ambientes nativos quanto em navegadores. O projeto está estruturado em múltiplos crates:
+- `proto`: Contém as definições das mensagens do protocolo em protobuf
+- `raft`: Contém a implementação do protocolo em sí
+- `harness`: Contém a infraestrutura necessária para criar clusters de teste, injetar falhas arbitrárias na rede e inspecionar o estado interno de cada nó.
 
-```
-rafty/
-├── src/
-│   ├── proto/          # Definições e serialização protobuf
-│   └── raft/           # Core do protocolo Raft
-└── harness/            # Framework de testes e simulação
-```
-
-### 3.2 Core como Máquina de Estados Push/Pull
-
-O núcleo da implementação é estruturado como uma **máquina de estados finita** que processa mensagens de forma determinística. A estrutura central é a struct `Node<Store, Chan, Rng>`, parametrizada por três tipos genéricos que permitem injeção de dependências para teste:
+O núcleo da implementação é estruturado como uma **máquina de estados finita** que processa mensagens de forma determinística. A estrutura central é a estrutura de dados `Node<Store, Chan, Rng>`, parametrizada por três tipos genéricos para armazenamento, comunicação com outros nós e geração de valores aleatórios que permitem injeção de dependências e falhas para teste:
 
 ```rust
 pub struct Node<Store: Storage, Chan: Channel, Rng: RngProvider> {
@@ -121,8 +82,6 @@ pub struct Node<Store: Storage, Chan: Channel, Rng: RngProvider> {
     pub election_timeout: u64,
 }
 ```
-
-#### 3.2.1 Método `step()` - Processamento de Mensagens
 
 O método `step()` implementa a lógica de transição de estados baseada em mensagens recebidas:
 
@@ -143,9 +102,7 @@ pub fn step(&mut self, msg: Message) -> Result<()> {
 
 Cada variante de mensagem dispara um manipulador específico que atualiza o estado interno do nó conforme as regras do protocolo Raft.
 
-#### 3.2.2 Método `tick()` - Avanço Temporal
-
-O método `tick()` simula a passagem do tempo, incrementando contadores internos e disparando ações baseadas em timeout:
+O método `tick()` simula a passagem do tempo, incrementando contadores internos e disparando ações baseadas em timeout, e deve ser chamado periodicamente pela aplicação:
 
 ```rust
 pub fn tick(&mut self) {
@@ -153,6 +110,7 @@ pub fn tick(&mut self) {
         Role::Follower(state) => {
             state.ticks_since_last_msg += 1;
             if state.election_timeout_passed(self.election_timeout) {
+                // Se torna um candidato e inicia uma eleição
                 let _ = self.step(Message::StartCampaign);
             }
         }
@@ -160,6 +118,7 @@ pub fn tick(&mut self) {
             state.ticks_since_election_start += 1;
             if state.votes.has_majority_for() {
                 // Transição para líder
+                // ...
             }
         }
         Role::Leader(state) => {
@@ -173,8 +132,6 @@ pub fn tick(&mut self) {
 ```
 
 Esta separação entre processamento de eventos (`step`) e avanço temporal (`tick`) caracteriza o padrão **push/pull**: mensagens são "empurradas" para o nó via `step()`, enquanto o nó "puxa" informações temporais via `tick()`.
-
-### 3.3 Driver com Interface Amigável
 
 O módulo `harness` fornece uma camada de abstração que envolve o core Raft com interfaces mais acessíveis para testes e integração:
 
@@ -274,7 +231,7 @@ impl Channel for TcpChannel {
         let bytes = msg.encode_to_vec();
         // Envia via TCP stream
     }
-    
+
     fn broadcast(&mut self, msg: ProtoMessage) {
         let bytes = msg.encode_to_vec();
         // Broadcast para todos os canais
@@ -282,38 +239,92 @@ impl Channel for TcpChannel {
 }
 ```
 
+### 3.5 Cenário de Implantação em Docker
+
+Além dos testes em memória e da visualização WASM, a implementação inclui um módulo `docker-scenario` que permite executar cada nó Raft em um container Docker isolado, proporcionando um ambiente de teste mais próximo das condições encontradas em implantações reais.
+
+#### 3.5.1 Arquitetura do Docker-Scenario
+
+O cenário Docker é composto por três serviços principais configurados via `docker-compose.yml`:
+
+- **node-1, node-2, node-3**: Três containers que executam a mesma imagem Docker, cada um com configurações específicas via variáveis de ambiente.
+
+Cada nó é configurado através das seguintes variáveis de ambiente:
+
+| Variável | Descrição | Exemplo |
+|----------|-----------|---------|
+| `RAFT_NODE_ID` | Identificador único do nó no cluster | 1, 2, 3 |
+| `RAFT_TCP_PORT` | Porta para comunicação Raft entre nós | 9001 |
+| `RAFT_HTTP_PORT` | Porta para API HTTP de status e dashboard | 8080 |
+| `RAFT_PEERS` | Lista de peers no formato `id=host:porta` | `2=node-2:9001,3=node-3:9001` |
+| `RAFT_LOG_LEVEL` | Nível de log (debug, info, basic) | info |
+
+#### 3.5.2 Componentes da Implementação
+
+O `docker-scenario` implementa componentes adicionais para suportar a execução em ambiente distribuído real:
+
+1. **`LoggingStorage<S: Storage>`**: Wrapper decorador que registra todas as operações de armazenamento (como append de entradas) para fins de debug e observabilidade.
+
+2. **`NetworkChannel`**: Implementação do trait `Channel` que estabelece conexões TCP reais com os peers configurados, incluindo reconexão automática em caso de falha.
+
+3. **Servidor HTTP embarcado**: Cada nó executa um servidor HTTP simples que expõe:
+   - `/` : Dashboard web com visualização em tempo real do estado do nó
+   - `/status` : Endpoint JSON com estado completo (role, term, voted_for, leader_id, commit_index, log_entries, logs)
+   - `/propose` : Endpoint POST para submeter novas entradas ao log (apenas líder aceita)
+
+#### 3.5.3 Build e Execução
+
+O Dockerfile utiliza multi-stage build para otimizar o tamanho da imagem final:
+
+```dockerfile
+# Stage 1: Build
+FROM rust:1.85-slim as builder
+RUN apt-get update && apt-get install -y protobuf-compiler
+WORKDIR /usr/src/rafty
+COPY . .
+RUN cargo build --release -p docker-scenario
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim
+COPY --from=builder /usr/src/rafty/target/release/docker-scenario .
+EXPOSE 9001 8080
+ENTRYPOINT ["./docker-scenario"]
+```
+
+Para iniciar o cluster:
+
+```bash
+docker-compose up --build
+```
+
+Os dashboards de cada nó ficam acessíveis em:
+- Node 1: http://localhost:8081
+- Node 2: http://localhost:8082
+- Node 3: http://localhost:8083
+
+#### 3.5.4 Casos de Uso do Docker-Scenario
+
+Este ambiente de execução permite:
+
+1. **Testes de rede real**: Os containers compartilham uma rede bridge Docker, onde latência e perda de pacotes podem ser injetadas via ferramentas como `tc` (traffic control).
+
+2. **Testes de falha de nós**: Containers podem ser pausados (`docker pause`), mortos (`docker kill`) ou reiniciados para simular crashes e recoveries.
+
+3. **Testes de partição de rede**: Regras de firewall ou redes Docker separadas podem isolar subconjuntos de nós.
+
+4. **Demonstração educacional**: Os dashboards web fornecem visualização em tempo real do comportamento do protocolo Raft sob diversas condições.
+
+5. **Validação de produção**: Configuração mais próxima de um deployment real em Kubernetes ou outros orquestradores de containers.
+
 ---
 
-## 4. Como Foi Testado
+## 4. Estratégia de testes
 
-### 4.1 Estratégia de Testes
+A implementação do protocolo foi validada através de uma abordagem de testes em múltiplas camadas, combinando testes unitários determinísticos com testes de simulação estocástica. Para isso, foi desenvolvida uma framework (como fala framework em pt?) de testes específica para esse intuito, que permite a simulação controlada de falhas, além de cenários deterministícos e reprodutíveis a partir de uma seed.
 
-A implementação do Raft foi validada através de uma abordagem de testes em múltiplas camadas, combinando testes unitários determinísticos com testes de simulação estocástica. O framework de testes foi projetado para ser **reprodutível** e **injetável**, permitindo a simulação controlada de falhas.
+Os testes determinísticos são executados no módulo `harness/tests/` e validam comportamentos específicos do protocolo. Cada teste foca em um aspecto particular do algoritmo, como eleição, replicação e invariantes críticas do sistema.
 
-### 4.2 Testes de Simulação Determinística
-
-Os testes determinísticos são executados no módulo `harness/tests/` e validam comportamentos específicos do protocolo de forma reproduzível. Cada teste foca em um aspecto particular do algoritmo:
-
-#### 4.2.1 Testes de Eleição (`election.rs`)
-
-- **`start_campaign`**: Verifica que um seguidor transita para candidato após o timeout de eleição.
-- **`elect_leader`**: Valida que um candidato torna-se líder ao receber maioria de votos.
-- **`elect_leader_right_after_majority`**: Confirma que a transição para líder ocorre imediatamente após obtenção da maioria.
-- **`leader_not_elected_with_one_vote`**: Demonstra que um candidato não pode ser eleito com apenas seu próprio voto.
-- **`election_after_leader_fails`**: Simula falha do líder e verifica que novos candidatos emergem.
-- **`stale_leader_steps_down`**: Valida que um líder com termo inferior cede autoridade a um candidato com termo superior.
-- **`election_candidate_log_less_up_to_date`**: Verifica que candidatos com logs menos completos não recebem votos.
-- **`election_split_vote_resolution`**: Demonstra resolução de empate em eleições divididas.
-
-#### 4.2.2 Testes de Replicação (`entry_replication.rs`, `append_entries.rs`)
-
-Validam a correta replicação de entradas de log do líder para seguidores, incluindo tratamento de inconsistências e retransmissão.
-
-#### 4.2.3 Testes de Sanidade (`sanity_check.rs`)
-
-Verificam invariantes básicos do sistema, como unicidade de líder por termo e consistência de termos entre nós.
-
-### 4.3 Testes Randomizados com Fault Injection
+Além dos testes focados em aspectos específicos, são executados testes determinísticos com cenários aleatórios, que podem incluir falhas de conexões específicas, nodes pausados por algum tempo, mensagens perdidas, etc. Durante esses testes as invariantes do sistema são checadas para confirmar que não foram violadas.
 
 O módulo `randomized.rs` implementa testes estocásticos que utilizam geradores de números aleatórios determinísticos para garantir reprodutibilidade:
 
@@ -331,23 +342,13 @@ where
                 .unwrap()
                 .as_nanos() as u64
         });
-    
+
     // Executa teste com seed específica
     // Em caso de falha, imprime seed para reprodução
 }
 ```
 
-#### 4.3.1 Tipos de Testes Randomizados
-
-1. **`randomized_lossy_network`**: Simula rede com perda de pacotes entre 10% e 40%, validando que um líder é eventualmente eleito e mantido.
-
-2. **`randomized_transient_node_outages`**: Simula falhas transitórias de nós, onde nós são aleatoriamente pausados e retomados, garantindo que pelo menos uma maioria permaneça ativa.
-
-3. **`randomized_log_agreement`**: Após eleição de líder e replicação de entradas, verifica que todos os nós possuem logs consistentes até o índice comitado mínimo.
-
-4. **`election_fails_with_total_network_partition`**: Valida que, com 100% de perda de mensagens, nenhuma eleição pode ser completada (propriedade de segurança).
-
-### 4.4 Interfaces que Facilitam Testes
+### 4.4 Interfaces
 
 A arquitetura da implementação foi deliberadamente projetada para facilitar testes através de **injeção de dependência** via traits.
 
@@ -365,7 +366,7 @@ pub trait Storage {
 }
 ```
 
-A implementação **`MemStorage`** utilizada nos testes é um armazenamento volátil baseado em `Vec`, que não persiste entre crashes do processo:
+A implementação **`MemStorage`** utilizada nos testes é um armazenamento volátil baseado em `Vec` (array dinâmico da biblioteca padrão), que perde dados entre crashes do processo:
 
 ```rust
 pub struct MemStorage {
@@ -441,13 +442,13 @@ Esta abstração permite que testes randomizados sejam executados com seeds espe
 
 A combinação das interfaces testáveis permite simular os seguintes cenários de falha:
 
-| Tipo de Falha | Mecanismo de Simulação |
-|--------------|------------------------|
-| Perda de pacotes | `FaultyChannel` com `drop_rate` configurável |
-| Falha de nó | `Cluster::pause_node()` / `resume_node()` |
-| Partição de rede | `ONLY_FAULT` entre subconjuntos de nós |
-| Atraso de mensagens | (Implementável via `FaultyChannel` com delay) |
-| Falha de líder | Pausar nó líder e aguardar nova eleição |
+| Tipo de Falha       | Mecanismo de Simulação                            |
+| ------------------- | ------------------------------------------------- |
+| Perda de pacotes    | `FaultyChannel` com `drop_rate` configurável      |
+| Falha de nó         | `Cluster::pause_node()` / `resume_node()`         |
+| Partição de rede    | `ONLY_FAULT` entre subconjuntos de nós            |
+| Atraso de mensagens | (Implementável via `FaultyChannel` com delay)     |
+| Falha de líder      | Pausar nó líder e aguardar nova eleição           |
 | Logs inconsistentes | Manipulação direta de `MemStorage` antes do teste |
 
 ---
@@ -466,12 +467,20 @@ Os testes implementados, combinando abordagens determinísticas e randomizadas, 
 
 ## Referências
 
-1. ONGARO, D.; OUSTERHOUT, J. In Search of an Understandable Consensus Algorithm. **USENIX Annual Technical Conference**, 2014.
+[^1]: LAMPORT, L. The Part-Time Parliament. **ACM Transactions on Computer Systems**, v. 16, n. 2, p. 133-169, 1998. DOI: 10.1145/279227.279229.
 
-2. LAMPORT, L. The Part-Time Parliament. **ACM Transactions on Computer Systems**, v. 16, n. 2, p. 133-169, 1998.
+[^2]: LAMPORT, L. Paxos Made Simple. **ACM SIGACT News**, v. 32, n. 4, p. 18-25, 2001. Disponível em: <https://lamport.azurewebsites.net/pubs/paxos-simple.pdf>.
 
-3. Google Protocol Buffers Documentation. Disponível em: <https://developers.google.com/protocol-buffers>.
+[^3]: LAMPORT, L. Fast Paxos. **Distributed Computing**, v. 19, n. 2, p. 79-103, 2006. DOI: 10.1007/s00446-006-0005-y.
 
-4. The Rust Programming Language Documentation. Disponível em: <https://doc.rust-lang.org/>.
+[^4]: ONGARO, D.; OUSTERHOUT, J. In Search of an Understandable Consensus Algorithm. **USENIX Annual Technical Conference**, 2014. p. 305-319.
 
-5. WebAssembly Documentation. Disponível em: <https://webassembly.org/>.
+[^5]: OKI, B. M.; LISKOV, B. H. Viewstamped Replication: A New Primary Copy Method to Support Highly-Available Distributed Systems. In: **ACM Symposium on Principles of Distributed Computing (PODC)**. Toronto, Canada: ACM, 1988. p. 8-17. DOI: 10.1145/62546.62549.
+
+[^6]: SCHNEIDER, F. B. Implementing Fault-Tolerant Services Using the State Machine Approach: A Tutorial. **ACM Computing Surveys**, v. 22, n. 4, p. 299-319, 1990. DOI: 10.1145/98163.98167.
+
+[^7]: Google Protocol Buffers Documentation. Disponível em: <https://developers.google.com/protocol-buffers>. Acesso em: 2026.
+
+[^8]: The Rust Programming Language Documentation. Disponível em: <https://doc.rust-lang.org/>. Acesso em: 2026.
+
+[^9]: WebAssembly Documentation. Disponível em: <https://webassembly.org/>. Acesso em: 2026.
