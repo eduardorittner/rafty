@@ -2,13 +2,9 @@
 
 ## 1. Introdução do Problema
 
-### 1.1 Contextualização sobre Algoritmos de Consenso Distribuído
-
 No contexto de sistemas distribuídos, o problema do consenso tem como objetivo fazer com que nós independentes concordem sobre uma sequência de valores mesmo na presença de falhas parciais do sistema. Este problema é fundamental para a construção de sistemas tolerantes a falhas, como bancos de dados distribuídos, sistemas de coordenação e blockchains. No entanto, "falhas parciais" é um termo vago, e cada algoritmo de consenso distribuído possui garantias distintas, e protege contra tipos de falhas distintos.
 
 Protocolos Leader-based como Paxos e Raft garantem consistência sequencial e progresso, desde que a maioria dos nós esteja viva. Já os protocolos tolerantes a falhas bizantinas (como PBFT ou FBFT), isto é, são tolerantes a nós "maliciosos" que propositalmente enviam mensagens falsas. Os protocolos tolerantes a falhas bizantinas são substancialmente mais complexos ou computacionalmente caros, ou os dois, visto que num geral oferecem estritamente mais garantias que os protocolos não tolerantes a falhas bizantinas.
-
-### 1.2 Algoritmos Anteriores ao Raft
 
 O algoritmo **Paxos**, proposto por Leslie Lamport em 1989, estabeleceu-se como o primeiro algoritmo de consenso prático e formalmente verificado. Apesar de sua correção matemática, o Paxos tornou-se notório por sua complexidade de compreensão e implementação. A descrição original do algoritmo utiliza uma abordagem baseada em "propostas" e "aceites" que, embora elegante do ponto de vista teórico, resulta em código difícil de depurar e manter na prática[^1].
 
@@ -63,7 +59,7 @@ A formulação matemática do Raft garante as seguintes propriedades críticas:
 A implementação foi feita utilizando a linguagem de programação Rust e está separada em 3 bibliotecas (também conhecidas como crates dentro do ecossistema Rust) pequenas e com um único foco cada:
 
 - `proto`: Contém as definições das mensagens do protocolo em protobuf
-- `raft`: Contém a implementação do protocolo em sí
+- `raft`: Contém a implementação do protocolo em si
 - `harness`: Contém a infraestrutura necessária para criar clusters de teste, injetar falhas arbitrárias na rede e inspecionar o estado interno de cada nó.
 
 O núcleo da implementação é estruturado como uma **máquina de estados finita** que processa mensagens de forma determinística. A estrutura central é a estrutura de dados `Node<Store, Chan, Rng>`, parametrizada por três tipos genéricos para armazenamento, comunicação com outros nós e geração de valores aleatórios que permitem injeção de dependências e falhas para teste:
@@ -133,11 +129,7 @@ pub fn tick(&mut self) {
 
 Esta separação entre processamento de eventos (`step`) e avanço temporal (`tick`) caracteriza o padrão **push/pull**: mensagens são "empurradas" para o nó via `step()`, enquanto o nó "puxa" informações temporais via `tick()`.
 
-O módulo `harness` fornece uma camada de abstração que envolve o core Raft com interfaces mais acessíveis para testes e integração:
-
-#### 3.3.1 Cluster
-
-A struct `Cluster<Rng>` gerencia múltiplos nós Raft em um único processo, facilitando testes de integração:
+O módulo `harness` fornece uma camada de abstração que envolve o core Raft com interfaces mais acessíveis para testes e integração. A struct `Cluster<Rng>` gerencia múltiplos nós Raft em um único processo, facilitando testes de integração:
 
 ```rust
 pub struct Cluster<Rng: RngProvider = raft::DefaultRng> {
@@ -150,11 +142,7 @@ pub struct Cluster<Rng: RngProvider = raft::DefaultRng> {
 }
 ```
 
-Operações como `tick()`, `step()`, `pause_node()` e `resume_node()` permitem simular cenários complexos de falha de forma controlada.
-
-#### 3.3.2 Suporte WASM
-
-O projeto inclui configuração específica para compilação WASM através do script `wasm.sh`:
+Operações como `tick()`, `step()`, `pause_node()` e `resume_node()` permitem simular cenários complexos de falha de forma controlada. O projeto inclui também configuração específica para compilação WASM através do script `wasm.sh`:
 
 ```bash
 cd harness && wasm-pack build --release --target web --out-dir pkg --out-name rafty_wasm
@@ -162,13 +150,7 @@ cd harness && wasm-pack build --release --target web --out-dir pkg --out-name ra
 
 Módulos condicionais (`#[cfg(target_arch = "wasm32")]`) fornecem implementações específicas para ambiente web, incluindo `WasmCluster` e tipos serializáveis para comunicação com JavaScript.
 
-### 3.4 Sistema de Comunicação com Protobuf
-
-A serialização e desserialização de mensagens é realizada utilizando **Protocol Buffers (protobuf)**, um mecanismo eficiente e language-agnostic desenvolvido pelo Google.
-
-#### 3.4.1 Definição das Mensagens
-
-O arquivo `message.proto` define a estrutura das mensagens:
+A serialização e desserialização de mensagens é realizada utilizando **Protocol Buffers (protobuf)**, um mecanismo eficiente e language-agnostic desenvolvido pelo Google. O arquivo `message.proto` define a estrutura das mensagens:
 
 ```protobuf
 syntax = "proto3";
@@ -203,8 +185,6 @@ enum ProtoMessageType {
 }
 ```
 
-#### 3.4.2 Camada de Tipo Seguro
-
 Para melhorar a segurança de tipos em Rust, a implementação introduz um enum `Message` que encapsula as variantes específicas com seus campos relevantes:
 
 ```rust
@@ -219,11 +199,7 @@ pub enum Message {
 }
 ```
 
-Conversões bidirecionais (`From<Message> for ProtoMessage` e vice-versa) permitem transição transparente entre a representação tipada interna e a representação serializável externa.
-
-#### 3.4.3 Implementação TCP
-
-Para comunicação em ambiente nativo, a struct `TcpChannel` implementa o trait `Channel` utilizando sockets TCP:
+Conversões bidirecionais (`From<Message> for ProtoMessage` e vice-versa) permitem transição transparente entre a representação tipada interna e a representação serializável externa. Para comunicação em ambiente nativo, a struct `TcpChannel` implementa o trait `Channel` utilizando sockets TCP:
 
 ```rust
 impl Channel for TcpChannel {
@@ -239,13 +215,7 @@ impl Channel for TcpChannel {
 }
 ```
 
-### 3.5 Cenário de Implantação em Docker
-
-Além dos testes em memória e da visualização WASM, a implementação inclui um módulo `docker-scenario` que permite executar cada nó Raft em um container Docker isolado, proporcionando um ambiente de teste mais próximo das condições encontradas em implantações reais.
-
-#### 3.5.1 Arquitetura do Docker-Scenario
-
-O cenário Docker é composto por três serviços principais configurados via `docker-compose.yml`:
+Além dos testes em memória e da visualização WASM, a implementação inclui um módulo `docker-scenario` que permite executar cada nó Raft em um container Docker isolado, proporcionando um ambiente de teste mais próximo das condições encontradas em implantações reais. O cenário Docker é composto por três serviços principais configurados via `docker-compose.yml`:
 
 - **node-1, node-2, node-3**: Três containers que executam a mesma imagem Docker, cada um com configurações específicas via variáveis de ambiente.
 
@@ -259,20 +229,13 @@ Cada nó é configurado através das seguintes variáveis de ambiente:
 | `RAFT_PEERS` | Lista de peers no formato `id=host:porta` | `2=node-2:9001,3=node-3:9001` |
 | `RAFT_LOG_LEVEL` | Nível de log (debug, info, basic) | info |
 
-#### 3.5.2 Componentes da Implementação
-
-O `docker-scenario` implementa componentes adicionais para suportar a execução em ambiente distribuído real:
+Para suportar a execução em ambiente distribuído real, o `docker-scenario` implementa componentes adicionais:
 
 1. **`LoggingStorage<S: Storage>`**: Wrapper decorador que registra todas as operações de armazenamento (como append de entradas) para fins de debug e observabilidade.
 
 2. **`NetworkChannel`**: Implementação do trait `Channel` que estabelece conexões TCP reais com os peers configurados, incluindo reconexão automática em caso de falha.
 
-3. **Servidor HTTP embarcado**: Cada nó executa um servidor HTTP simples que expõe:
-   - `/` : Dashboard web com visualização em tempo real do estado do nó
-   - `/status` : Endpoint JSON com estado completo (role, term, voted_for, leader_id, commit_index, log_entries, logs)
-   - `/propose` : Endpoint POST para submeter novas entradas ao log (apenas líder aceita)
-
-#### 3.5.3 Build e Execução
+3. **Servidor HTTP embarcado**: Cada nó executa um servidor HTTP simples que expõe `/` (dashboard web com visualização em tempo real do estado do nó), `/status` (endpoint JSON com estado completo) e `/propose` (endpoint POST para submeter novas entradas ao log, aceito apenas pelo líder).
 
 O Dockerfile utiliza multi-stage build para otimizar o tamanho da imagem final:
 
@@ -291,20 +254,7 @@ EXPOSE 9001 8080
 ENTRYPOINT ["./docker-scenario"]
 ```
 
-Para iniciar o cluster:
-
-```bash
-docker-compose up --build
-```
-
-Os dashboards de cada nó ficam acessíveis em:
-- Node 1: http://localhost:8081
-- Node 2: http://localhost:8082
-- Node 3: http://localhost:8083
-
-#### 3.5.4 Casos de Uso do Docker-Scenario
-
-Este ambiente de execução permite:
+Para iniciar o cluster, executa-se `docker-compose up --build`, de modo que os dashboards de cada nó ficam acessíveis nos endereços locais nas portas 8081, 8082 e 8083. Este ambiente de execução permite simular diversos cenários e validar a implementação do protocolo, como:
 
 1. **Testes de rede real**: Os containers compartilham uma rede bridge Docker, onde latência e perda de pacotes podem ser injetadas via ferramentas como `tc` (traffic control).
 
@@ -320,11 +270,11 @@ Este ambiente de execução permite:
 
 ## 4. Estratégia de testes
 
-A implementação do protocolo foi validada através de uma abordagem de testes em múltiplas camadas, combinando testes unitários determinísticos com testes de simulação estocástica. Para isso, foi desenvolvida uma framework (como fala framework em pt?) de testes específica para esse intuito, que permite a simulação controlada de falhas, além de cenários deterministícos e reprodutíveis a partir de uma seed.
+A implementação do protocolo foi validada através de uma abordagem de testes em múltiplas camadas, combinando testes unitários determinísticos com testes de simulação estocástica. Para isso, foi desenvolvida uma infraestrutura de testes específica para esse intuito, que permite a simulação controlada de falhas, além de cenários determinísticos e reprodutíveis a partir de uma seed.
 
 Os testes determinísticos são executados no módulo `harness/tests/` e validam comportamentos específicos do protocolo. Cada teste foca em um aspecto particular do algoritmo, como eleição, replicação e invariantes críticas do sistema.
 
-Além dos testes focados em aspectos específicos, são executados testes determinísticos com cenários aleatórios, que podem incluir falhas de conexões específicas, nodes pausados por algum tempo, mensagens perdidas, etc. Durante esses testes as invariantes do sistema são checadas para confirmar que não foram violadas.
+Além dos testes focados em aspectos específicos, são executados testes determinísticos com cenários aleatórios, que podem incluir falhas de conexões específicas, nós pausados por algum tempo, mensagens perdidas, etc. Durante esses testes as invariantes do sistema são checadas para confirmar que não foram violadas.
 
 O módulo `randomized.rs` implementa testes estocásticos que utilizam geradores de números aleatórios determinísticos para garantir reprodutibilidade:
 
@@ -348,13 +298,7 @@ where
 }
 ```
 
-### 4.4 Interfaces
-
-A arquitetura da implementação foi deliberadamente projetada para facilitar testes através de **injeção de dependência** via traits.
-
-#### 4.4.1 Trait `Storage`
-
-A trait `Storage` abstrai o armazenamento persistente do log Raft:
+Para facilitar testes através de **injeção de dependência**, a arquitetura da implementação foi deliberadamente projetada utilizando traits. A trait `Storage` abstrai o armazenamento persistente do log Raft:
 
 ```rust
 pub trait Storage {
@@ -374,11 +318,7 @@ pub struct MemStorage {
 }
 ```
 
-Esta simplificação permite testes rápidos e isolados, sem a complexidade de I/O de disco ou recuperação de falhas.
-
-#### 4.4.2 Trait `Channel`
-
-A trait `Channel` abstrai a comunicação entre nós:
+Esta simplificação permite testes rápidos e isolados, sem a complexidade de I/O de disco ou recuperação de falhas. Adicionalmente, a trait `Channel` abstrai a comunicação entre nós:
 
 ```rust
 pub trait Channel {
@@ -398,9 +338,7 @@ pub struct TestChannel<Rng: RngProvider> {
 }
 ```
 
-#### 4.4.3 Injeção de Falhas via `FaultyChannel`
-
-O `FaultyChannel` envolve um canal de envio com uma taxa de descarte configurável:
+Para simular falhas, o `FaultyChannel` envolve um canal de envio com uma taxa de descarte configurável:
 
 ```rust
 pub struct FaultyChannel<Rng: RngProvider> {
@@ -419,11 +357,7 @@ impl<Rng: RngProvider> FaultyChannel<Rng> {
 }
 ```
 
-Constantes como `NO_FAULT` (100% de entrega) e `ONLY_FAULT` (0% de entrega) facilitam a configuração de cenários extremos.
-
-#### 4.4.4 Trait `RngProvider`
-
-A trait `RngProvider` abstrai a geração de números aleatórios:
+Constantes como `NO_FAULT` (100% de entrega) e `ONLY_FAULT` (0% de entrega) facilitam a configuração de cenários extremos. Por fim, a trait `RngProvider` abstrai a geração de números aleatórios:
 
 ```rust
 pub trait RngProvider: Send + Sync + Clone + std::fmt::Debug + 'static {
@@ -431,16 +365,7 @@ pub trait RngProvider: Send + Sync + Clone + std::fmt::Debug + 'static {
 }
 ```
 
-Duas implementações são fornecidas:
-
-- **`DefaultRng`**: Utiliza o gerador aleatório do sistema para produção.
-- **`DeterministicRng`**: Utiliza `StdRng` com seed fixa para testes reproduzíveis.
-
-Esta abstração permite que testes randomizados sejam executados com seeds específicas, garantindo que falhas possam ser reproduzidas deterministicamente.
-
-### 4.5 Cobertura de Cenários de Falha
-
-A combinação das interfaces testáveis permite simular os seguintes cenários de falha:
+Duas implementações são fornecidas: o `DefaultRng`, que utiliza o gerador aleatório do sistema para produção, e o `DeterministicRng`, que utiliza `StdRng` com seed fixa para testes reproduzíveis. Esta abstração permite que testes randomizados sejam executados com seeds específicas, garantindo que falhas possam ser reproduzidas deterministicamente. A combinação dessas interfaces testáveis permite simular diversos cenários de falha, conforme resumido na tabela a seguir:
 
 | Tipo de Falha       | Mecanismo de Simulação                            |
 | ------------------- | ------------------------------------------------- |
@@ -456,6 +381,8 @@ A combinação das interfaces testáveis permite simular os seguintes cenários 
 ## 5. Conclusão
 
 A implementação do protocolo Raft apresentada neste relatório demonstra uma abordagem moderna e bem estruturada para consenso distribuído. A separação clara entre o core do protocolo (máquina de estados push/pull) e as camadas de abstração (driver, comunicação, armazenamento) segue princípios de design que favorecem testabilidade e manutenibilidade.
+
+Embora o algoritmo Raft completo especifique mecanismos para mudança dinâmica de configuração (como adição e remoção de nós) e compactação de logs através de snapshots para gerenciar o crescimento do estado físico, essas funcionalidades não foram incluídas na presente implementação. O raciocínio para essa decisão de design reside no fato de que o núcleo implementado — contendo a eleição de líder estável, a replicação básica de entradas e a recuperação de logs consistentes — é suficiente para atingir consistência sequencial na máquina de estados replicada. Em ambientes controlados ou acadêmicos, a configuração estática do cluster e a ausência de snapshots não comprometem a correção das propriedades de segurança e liveness do consenso, mantendo a integridade da ordem de execução de todas as operações por todos os nós.
 
 O uso de traits genéricas para `Storage`, `Channel` e `RngProvider` permite que a mesma implementação core seja testada em diversos cenários de falha sem modificação do código principal. Esta arquitetura facilita não apenas testes unitários e de integração, mas também a extensão do sistema para diferentes backends de armazenamento e protocolos de comunicação.
 
