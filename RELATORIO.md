@@ -23,7 +23,20 @@ Publicado em 2014 por Diego Ongaro e John Ousterhout, o **Raft** foi projetado c
 
 O Raft é geralmente utilizado para replicar uma sequência de comandos, que podem ser executados independentemente por cada nó para chegar ao mesmo estado final, num modelo chamado de **máquinas de estado replicadas** (replicated state machines)[^6]. O algoritmo garante consistência sequencial (ou seja, uma única ordem global) para os comandos desde que a maioria dos nós esteja operacional, essas falhas podem incluir crashes, perda arbitrária de mensagens, redes falhas, dentre outras.
 
-Em um dado momento, cada nó encontra-se em exatamente em um de três estados: seguidor, candidato e líder. Seguidores são nós passivos que respondem a requisições de líderes e candidatos, e não iniciam requisições por conta própria. Seguidores que não recebem nenhum tipo de comunicação do líder dentro de um determinado período se tornam candidatos e passam a solicitar votos de outros nós para tentar se estabelecer como um novo líder. O líder é o nó responsável por gerenciar toda a replicação do log, em qualquer dado momento existe no máximo um líder válido (isto é, o líder com maior termo).
+Em um dado momento, cada nó encontra-se em exatamente em um de três estados: seguidor, candidato e líder. Seguidores são nós passivos que respondem a requisições de líderes e candidatos, e não iniciam requisições por conta própria. Seguidores que não recebem nenhum tipo de comunicação do líder dentro de um determinado período se tornam candidatos e passam a solicitar votos de outros nós para tentar se estabelecer como um novo líder. O líder é o nó responsável por gerenciar toda a replicação do log, em qualquer dado momento existe no máximo um líder válido (isto é, o líder com maior termo). A transição entre estes três estados centrais é ilustrada pelo diagrama a seguir:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Seguidor : Inicialização do nó
+    
+    Seguidor --> Candidato : Timeout de eleição (sem heartbeat ou AppendEntries)
+    
+    Candidato --> Candidato : Timeout de eleição (reinicia eleição com termo incrementado)
+    Candidato --> Líder : Obtém votos da maioria dos nós
+    Candidato --> Seguidor : Descobre termo superior ou líder ativo
+    
+    Líder --> Seguidor : Descobre termo superior (em RPC ou resposta)
+```
 
 O tempo no Raft é dividido em **termos**, que são números inteiros sequenciais que atuam como relógios lógicos. Cada termo começa com uma eleição:
 
