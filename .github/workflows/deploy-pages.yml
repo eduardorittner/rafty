@@ -31,13 +31,34 @@ jobs:
 
       - name: Convert Markdown to HTML
         run: |
+          cat > include-after.html << 'EOF'
+          <script type="module">
+            import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+            mermaid.initialize({ startOnLoad: false });
+            
+            document.addEventListener("DOMContentLoaded", async () => {
+              const elements = document.querySelectorAll("pre.mermaid, pre.sourceCode.mermaid");
+              for (const pre of elements) {
+                const code = pre.querySelector("code");
+                if (code) {
+                  const div = document.createElement("div");
+                  div.className = "mermaid";
+                  div.textContent = code.textContent;
+                  pre.replaceWith(div);
+                }
+              }
+              await mermaid.run();
+            });
+          </script>
+          EOF
           pandoc RELATORIO.md \
             -o index.html \
             --standalone \
             --metadata title="Relatório Técnico: Implementação do Protocolo Raft" \
             --css style.css \
             --toc \
-            --toc-depth=3
+            --toc-depth=3 \
+            -A include-after.html
 
       - name: Create CSS file
         run: |
@@ -183,6 +204,13 @@ jobs:
             body {
               padding: 20px 10px;
             }
+          }
+
+          .mermaid {
+            display: flex;
+            justify-content: center;
+            margin: 24px 0;
+            width: 100%;
           }
           EOF
 
