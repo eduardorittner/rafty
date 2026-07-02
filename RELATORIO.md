@@ -69,325 +69,59 @@ A formulação matemática do Raft garante as seguintes propriedades críticas:
 
 ## 3. Detalhes da Implementação
 
-A implementação foi feita utilizando a linguagem de programação Rust e está separada em 3 bibliotecas (também conhecidas como crates dentro do ecossistema Rust) pequenas e com um único foco cada:
+A implementação é organizada em três componentes principais:
+- **Definição de Mensagens**: Contém a especificação das mensagens do protocolo utilizando Protocol Buffers (protobuf), garantindo serialização eficiente e independente de linguagem.
+- **Núcleo do Protocolo**: Contém a lógica de consenso, controle de estado do nó, eleição de líder e replicação do log.
+- **Infraestrutura de Simulação**: Contém o simulador para criação de clusters em memória, injeção de falhas de rede e inspeção do estado interno de cada nó.
 
-- `proto`: Contém as definições das mensagens do protocolo em protobuf
-- `raft`: Contém a implementação do protocolo em si
-- `harness`: Contém a infraestrutura necessária para criar clusters de teste, injetar falhas arbitrárias na rede e inspecionar o estado interno de cada nó.
+O núcleo da implementação é estruturado como uma **máquina de estados finita** que processa mensagens de forma determinística. Cada nó do cluster mantém variáveis de estado essenciais para o funcionamento do protocolo, tais como: o termo atual (relógio lógico), em quem o nó votou no termo atual, a identidade do líder conhecido, o papel atual do nó (seguidor, candidato ou líder), o log de comandos local, e o estado dos timeouts para eleições e envio de heartbeats.
 
-O núcleo da implementação é estruturado como uma **máquina de estados finita** que processa mensagens de forma determinística. A estrutura central é a estrutura de dados `Node<Store, Chan, Rng>`, parametrizada por três tipos genéricos para armazenamento, comunicação com outros nós e geração de valores aleatórios que permitem injeção de dependências e falhas para teste:
+O processamento é guiado por duas operações fundamentais:
+1. **Passo de Evento (`step`)**: Uma função determinística que recebe uma mensagem (como requisições de voto ou replicação de entradas) e atualiza o estado interno do nó de acordo com as regras do Raft.
+2. **Avanço Temporal (`tick`)**: Uma função chamada periodicamente para simular a passagem do tempo. Ela incrementa contadores de tempo e dispara ações como o início de uma campanha eleitoral (se um seguidor sofrer timeout de eleição) ou o envio de heartbeats periódicos (se o nó for o líder).
 
-```rust
-pub struct Node<Store: Storage, Chan: Channel, Rng: RngProvider> {
-    pub id: ValidNodeId,
-    pub term: u64,
-    pub voted_for: NodeId,
-    pub leader_id: NodeId,
-    pub role: Role,
-    pub config: InitialConfig,
-    pub storage: RaftLog<Store>,
-    pub channel: Chan,
-    pub rng: Rng,
-    pub election_timeout: u64,
-}
-```
+Esta separação caracteriza o padrão **push/pull**: mensagens de rede são "empurradas" (*push*) para o nó através de eventos, enquanto o controle de tempo e expiração de timeouts é verificado de forma ativa (*pull*).
 
-O método `step()` implementa a lógica de transição de estados baseada em mensagens recebidas:
+Para validação e integração, a infraestrutura de simulação provê um simulador de cluster que gerencia múltiplos nós em um único processo. Ele permite pausar e retomar nós individualmente, além de interceptar e manipular as mensagens trocadas, tornando viável a simulação de falhas de rede complexas de forma controlada. Adicionalmente, o sistema é compilado para WebAssembly (WASM), permitindo que todo o cluster simulado e a lógica de consenso rodem diretamente no navegador para fins de visualização gráfica e demonstrações educacionais.
 
-```rust
-pub fn step(&mut self, msg: Message) -> Result<()> {
-    match msg {
-        Message::StartCampaign => self.start_campaign(),
-        Message::Heartbeat(m) => self.step_heartbeat(m),
-        Message::HeartbeatResponse(m) => self.step_heartbeat_response(m),
-        Message::Append(m) => self.step_append(m)?,
-        Message::AppendResponse(m) => self.step_append_response(m)?,
-        Message::RequestVote(m) => self.step_vote_request(m),
-        Message::RequestVoteResponse(m) => self.step_vote_response(m),
-    }
-    Ok(())
-}
-```
+A comunicação física entre os nós baseia-se em **Protocol Buffers**, que define os dados das entradas de log (`Entry`), as mensagens de controle de termo, commits, respostas e os tipos de mensagens (`AppendEntries`, `RequestVote`, etc.). A lógica do protocolo consome essas estruturas por meio de uma camada de tipos seguros que encapsula as mensagens de rede em representações internas da aplicação. 
 
-Cada variante de mensagem dispara um manipulador específico que atualiza o estado interno do nó conforme as regras do protocolo Raft.
+Para a execução em rede real, a abstração de canal de comunicação é implementada através de conexões de sockets TCP tradicionais. Cada nó estabelece fluxos de dados com seus pares para o envio e broadcast de mensagens serializadas.
 
-O método `tick()` simula a passagem do tempo, incrementando contadores internos e disparando ações baseadas em timeout, e deve ser chamado periodicamente pela aplicação:
+Além dos testes em memória e da visualização em navegador, a arquitetura permite executar cada nó do cluster em um container Docker isolado, simulando um ambiente distribuído real de forma muito próxima de uma implantação de produção. O cenário Docker é configurado com três nós individuais, cada um parametrizado por variáveis de ambiente que definem o identificador do nó, as portas TCP de comunicação, a porta HTTP de diagnóstico e a lista de pares na rede.
 
-```rust
-pub fn tick(&mut self) {
-    match &mut self.role {
-        Role::Follower(state) => {
-            state.ticks_since_last_msg += 1;
-            if state.election_timeout_passed(self.election_timeout) {
-                // Se torna um candidato e inicia uma eleição
-                let _ = self.step(Message::StartCampaign);
-            }
-        }
-        Role::Candidate(state) => {
-            state.ticks_since_election_start += 1;
-            if state.votes.has_majority_for() {
-                // Transição para líder
-                // ...
-            }
-        }
-        Role::Leader(state) => {
-            state.ticks_since_last_heartbeat += 1;
-            if state.ticks_since_last_heartbeat >= self.config.ticks_between_heartbeats {
-                self.broadcast_heartbeats();
-            }
-        }
-    }
-}
-```
+Para dar suporte a esse ambiente físico, a arquitetura estende a implementação do canal de comunicação utilizando sockets de rede reais com tratamento de erros e reconexão automática, além de fornecer um servidor HTTP embutido em cada nó. Esse servidor HTTP expõe endpoints para visualizar o status do nó em tempo real, depurar o estado interno em formato estruturado (JSON) e submeter novas propostas de escrita. 
 
-Esta separação entre processamento de eventos (`step`) e avanço temporal (`tick`) caracteriza o padrão **push/pull**: mensagens são "empurradas" para o nó via `step()`, enquanto o nó "puxa" informações temporais via `tick()`.
-
-O módulo `harness` fornece uma camada de abstração que envolve o core Raft com interfaces mais acessíveis para testes e integração. A struct `Cluster<Rng>` gerencia múltiplos nós Raft em um único processo, facilitando testes de integração:
-
-```rust
-pub struct Cluster<Rng: RngProvider = raft::DefaultRng> {
-    pub nodes: Vec<TestNode<Rng>>,
-    pub paused_nodes: HashSet<u64>,
-    pub message_buffer: Vec<ClusterMessage>,
-    state_callbacks: Vec<Box<dyn FnMut(&ClusterEvent)>>,
-    pub tick_rate_ms: u64,
-    pub rng: Rng,
-}
-```
-
-Operações como `tick()`, `step()`, `pause_node()` e `resume_node()` permitem simular cenários complexos de falha de forma controlada. O projeto inclui também configuração específica para compilação WASM através do script `wasm.sh`:
-
-```bash
-cd harness && wasm-pack build --release --target web --out-dir pkg --out-name rafty_wasm
-```
-
-Módulos condicionais (`#[cfg(target_arch = "wasm32")]`) fornecem implementações específicas para ambiente web, incluindo `WasmCluster` e tipos serializáveis para comunicação com JavaScript.
-
-A serialização e desserialização de mensagens é realizada utilizando **Protocol Buffers (protobuf)**, um mecanismo eficiente e language-agnostic desenvolvido pelo Google. O arquivo `message.proto` define a estrutura das mensagens:
-
-```protobuf
-syntax = "proto3";
-package proto.message;
-
-message Entry {
-  uint64 term = 1;
-  uint64 index = 2;
-  bytes data = 3;
-}
-
-message ProtoMessage {
-  ProtoMessageType msg_type = 1;
-  uint64 to = 2;
-  uint64 from = 3;
-  uint64 term = 4;
-  uint64 commit = 5;
-  uint64 last_term = 6;
-  uint64 last_index = 7;
-  repeated Entry entries = 8;
-  uint64 voted_for = 9;
-  bool success = 10;
-}
-
-enum ProtoMessageType {
-  Heartbeat = 0;
-  HeartbeatResponse = 1;
-  AppendEntries = 2;
-  AppendEntriesResponse = 3;
-  RequestVote = 4;
-  RequestVoteResponse = 5;
-}
-```
-
-Para melhorar a segurança de tipos em Rust, a implementação introduz um enum `Message` que encapsula as variantes específicas com seus campos relevantes:
-
-```rust
-pub enum Message {
-    Heartbeat(Heartbeat),
-    HeartbeatResponse(Heartbeat),
-    Append(Append),
-    AppendResponse(AppendResponse),
-    RequestVote(RequestVote),
-    RequestVoteResponse(RequestVoteResponse),
-    StartCampaign,
-}
-```
-
-Conversões bidirecionais (`From<Message> for ProtoMessage` e vice-versa) permitem transição transparente entre a representação tipada interna e a representação serializável externa. Para comunicação em ambiente nativo, a struct `TcpChannel` implementa o trait `Channel` utilizando sockets TCP:
-
-```rust
-impl Channel for TcpChannel {
-    fn send(&mut self, msg: ProtoMessage) {
-        let bytes = msg.encode_to_vec();
-        // Envia via TCP stream
-    }
-
-    fn broadcast(&mut self, msg: ProtoMessage) {
-        let bytes = msg.encode_to_vec();
-        // Broadcast para todos os canais
-    }
-}
-```
-
-Além dos testes em memória e da visualização WASM, a implementação inclui um módulo `docker-scenario` que permite executar cada nó Raft em um container Docker isolado, proporcionando um ambiente de teste mais próximo das condições encontradas em implantações reais. O cenário Docker é composto por três serviços principais configurados via `docker-compose.yml`:
-
-- **node-1, node-2, node-3**: Três containers que executam a mesma imagem Docker, cada um com configurações específicas via variáveis de ambiente.
-
-Cada nó é configurado através das seguintes variáveis de ambiente:
-
-| Variável | Descrição | Exemplo |
-|----------|-----------|---------|
-| `RAFT_NODE_ID` | Identificador único do nó no cluster | 1, 2, 3 |
-| `RAFT_TCP_PORT` | Porta para comunicação Raft entre nós | 9001 |
-| `RAFT_HTTP_PORT` | Porta para API HTTP de status e dashboard | 8080 |
-| `RAFT_PEERS` | Lista de peers no formato `id=host:porta` | `2=node-2:9001,3=node-3:9001` |
-| `RAFT_LOG_LEVEL` | Nível de log (debug, info, basic) | info |
-
-Para suportar a execução em ambiente distribuído real, o `docker-scenario` implementa componentes adicionais:
-
-1. **`LoggingStorage<S: Storage>`**: Wrapper decorador que registra todas as operações de armazenamento (como append de entradas) para fins de debug e observabilidade.
-
-2. **`NetworkChannel`**: Implementação do trait `Channel` que estabelece conexões TCP reais com os peers configurados, incluindo reconexão automática em caso de falha.
-
-3. **Servidor HTTP embarcado**: Cada nó executa um servidor HTTP simples que expõe `/` (dashboard web com visualização em tempo real do estado do nó), `/status` (endpoint JSON com estado completo) e `/propose` (endpoint POST para submeter novas entradas ao log, aceito apenas pelo líder).
-
-O Dockerfile utiliza multi-stage build para otimizar o tamanho da imagem final:
-
-```dockerfile
-# Stage 1: Build
-FROM rust:1.85-slim as builder
-RUN apt-get update && apt-get install -y protobuf-compiler
-WORKDIR /usr/src/rafty
-COPY . .
-RUN cargo build --release -p docker-scenario
-
-# Stage 2: Runtime
-FROM debian:bookworm-slim
-COPY --from=builder /usr/src/rafty/target/release/docker-scenario .
-EXPOSE 9001 8080
-ENTRYPOINT ["./docker-scenario"]
-```
-
-Para iniciar o cluster, executa-se `docker-compose up --build`, de modo que os dashboards de cada nó ficam acessíveis nos endereços locais nas portas 8081, 8082 e 8083. Este ambiente de execução permite simular diversos cenários e validar a implementação do protocolo, como:
-
-1. **Testes de rede real**: Os containers compartilham uma rede bridge Docker, onde latência e perda de pacotes podem ser injetadas via ferramentas como `tc` (traffic control).
-
-2. **Testes de falha de nós**: Containers podem ser pausados (`docker pause`), mortos (`docker kill`) ou reiniciados para simular crashes e recoveries.
-
-3. **Testes de partição de rede**: Regras de firewall ou redes Docker separadas podem isolar subconjuntos de nós.
-
-4. **Demonstração educacional**: Os dashboards web fornecem visualização em tempo real do comportamento do protocolo Raft sob diversas condições.
-
-5. **Validação de produção**: Configuração mais próxima de um deployment real em Kubernetes ou outros orquestradores de containers.
+A imagem dos containers é construída em múltiplos estágios para otimização de tamanho, compilando os binários em uma imagem de build e copiando apenas o executável final para uma imagem de execução enxuta. A infraestrutura de containers permite simular partições de rede reais, latência de pacotes (via controle de tráfego do sistema operacional) e queda de servidores.
 
 ---
 
 ## 4. Estratégia de testes
 
-A implementação do protocolo foi validada através de uma abordagem de testes em múltiplas camadas, combinando testes unitários determinísticos com testes de simulação estocástica. Para isso, foi desenvolvida uma infraestrutura de testes específica para esse intuito, que permite a simulação controlada de falhas, além de cenários determinísticos e reprodutíveis a partir de uma seed.
+A validação da correção do protocolo foi realizada por meio de uma estratégia de testes em camadas, unindo testes unitários determinísticos a simulações estocásticas baseadas em sementes pseudoaleatórias. Isso garante que qualquer falha descoberta em cenários dinâmicos complexos possa ser reproduzida e depurada deterministicamente.
 
-Os testes determinísticos são executados no módulo `harness/tests/` e validam comportamentos específicos do protocolo. Cada teste foca em um aspecto particular do algoritmo, como eleição, replicação e invariantes críticas do sistema.
+Os testes determinísticos focam em cenários específicos do algoritmo, como a eleição do líder na ausência de falhas, a convergência rápida de logs divergentes, a rejeição de votos a candidatos desatualizados e a persistência de invariantes críticas do Raft. 
 
-Além dos testes focados em aspectos específicos, são executados testes determinísticos com cenários aleatórios, que podem incluir falhas de conexões específicas, nós pausados por algum tempo, mensagens perdidas, etc. Durante esses testes as invariantes do sistema são checadas para confirmar que não foram violadas.
+Já os testes estocásticos (aleatórios) operam gerando sequências de eventos de rede imprevisíveis — como partições de rede arbitrárias, mensagens duplicadas ou perdidas e queda temporária de nós — usando um gerador de números pseudoaleatórios alimentado por uma semente (*seed*). Quando um cenário de teste falha, a semente correspondente é registrada, permitindo rodar novamente o mesmo teste com comportamento idêntico para identificar a causa raiz.
 
-O módulo `randomized.rs` implementa testes estocásticos que utilizam geradores de números aleatórios determinísticos para garantir reprodutibilidade:
+Para viabilizar essa testabilidade sem acoplamento com o ambiente físico de rede e disco, a arquitetura baseia-se em **injeção de dependência** por meio de três abstrações principais:
 
-```rust
-fn run_randomized_test<F>(test_fn: F)
-where
-    F: FnOnce(u64) + std::panic::UnwindSafe,
-{
-    let seed = env::var("SEED")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64
-        });
+1. **Abstração de Armazenamento (`Storage`)**: Define a interface para leitura e escrita persistente do log Raft, como a consulta de termos de índices específicos, busca de intervalos de entradas e gravação no log. Durante os testes, utiliza-se uma implementação em memória baseada em um array dinâmico simples. Isso acelera drasticamente a execução dos testes e simplifica a simulação de falhas de escrita e falhas parciais sem a latência e complexidade de I/O de disco físico.
+2. **Abstração de Canal (`Channel`)**: Define a interface para envio direto e broadcast de mensagens. Nos testes em memória, essa abstração é implementada através de canais de comunicação na memória do processo, simulando redes instantâneas.
+3. **Abstração de Geração de Números Aleatórios (`RngProvider`)**: Abstrai a fonte de entropia do sistema. Para produção, utiliza-se o gerador do sistema operacional; para os testes, utiliza-se um gerador determinístico parametrizado por semente.
 
-    // Executa teste com seed específica
-    // Em caso de falha, imprime seed para reprodução
-}
-```
+Para a injeção controlada de falhas de rede nos testes, o canal de comunicação é envelopado por um componente que simula falhas probabilísticas de entrega. Esse componente utiliza o gerador de números aleatórios para decidir se cada mensagem enviada deve ser transmitida ou descartada silenciosamente de acordo com uma taxa de perda de pacotes configurada. Configurações extremas de taxa de falha (como bloqueio total ou passagem livre) facilitam a simulação imediata de partições de rede.
 
-Para facilitar testes através de **injeção de dependência**, a arquitetura da implementação foi deliberadamente projetada utilizando traits. A trait `Storage` abstrai o armazenamento persistente do log Raft:
-
-```rust
-pub trait Storage {
-    fn last_index(&self) -> u64;
-    fn term(&self, idx: u64) -> Result<u64>;
-    fn last_term(&self) -> u64;
-    fn entries(&self, low: u64, high: u64) -> Result<Vec<Entry>>;
-    fn append(&mut self, entries: Vec<Entry>) -> Result<()>;
-}
-```
-
-A implementação **`MemStorage`** utilizada nos testes é um armazenamento volátil baseado em `Vec` (array dinâmico da biblioteca padrão), que perde dados entre crashes do processo:
-
-```rust
-pub struct MemStorage {
-    log: Vec<Entry>,
-}
-```
-
-Esta simplificação permite testes rápidos e isolados, sem a complexidade de I/O de disco ou recuperação de falhas. Adicionalmente, a trait `Channel` abstrai a comunicação entre nós:
-
-```rust
-pub trait Channel {
-    fn send(&mut self, msg: ProtoMessage);
-    fn broadcast(&mut self, msg: ProtoMessage);
-}
-```
-
-A implementação de teste **`TestChannel<Rng>`** utiliza canais `mpsc` (multi-producer, single-consumer) da biblioteca padrão para comunicação intra-processo:
-
-```rust
-pub struct TestChannel<Rng: RngProvider> {
-    pub channels: Vec<FaultyChannel<Rng>>,
-    pub recv: Receiver<ProtoMessage>,
-    pub id: u64,
-    pub on_message_sent: Option<MessageCallback>,
-}
-```
-
-Para simular falhas, o `FaultyChannel` envolve um canal de envio com uma taxa de descarte configurável:
-
-```rust
-pub struct FaultyChannel<Rng: RngProvider> {
-    pub channel: Sender<ProtoMessage>,
-    pub drop_rate: FaultRate,
-    pub rng: Rng,
-}
-
-impl<Rng: RngProvider> FaultyChannel<Rng> {
-    pub fn send(&mut self, msg: ProtoMessage) {
-        if self.rng.random_range(1, 101) <= self.drop_rate.0 as u64 {
-            self.channel.send(msg).expect("Write to test channel failed");
-        }
-        // Caso contrário, mensagem é descartada (simula perda de rede)
-    }
-}
-```
-
-Constantes como `NO_FAULT` (100% de entrega) e `ONLY_FAULT` (0% de entrega) facilitam a configuração de cenários extremos. Por fim, a trait `RngProvider` abstrai a geração de números aleatórios:
-
-```rust
-pub trait RngProvider: Send + Sync + Clone + std::fmt::Debug + 'static {
-    fn random_range(&mut self, low: u64, high: u64) -> u64;
-}
-```
-
-Duas implementações são fornecidas: o `DefaultRng`, que utiliza o gerador aleatório do sistema para produção, e o `DeterministicRng`, que utiliza `StdRng` com seed fixa para testes reproduzíveis. Esta abstração permite que testes randomizados sejam executados com seeds específicas, garantindo que falhas possam ser reproduzidas deterministicamente. A combinação dessas interfaces testáveis permite simular diversos cenários de falha, conforme resumido na tabela a seguir:
+A tabela a seguir resume como os diferentes tipos de problemas reais são simulados na infraestrutura de testes utilizando essas abstrações:
 
 | Tipo de Falha       | Mecanismo de Simulação                            |
 | ------------------- | ------------------------------------------------- |
-| Perda de pacotes    | `FaultyChannel` com `drop_rate` configurável      |
-| Falha de nó         | `Cluster::pause_node()` / `resume_node()`         |
-| Partição de rede    | `ONLY_FAULT` entre subconjuntos de nós            |
-| Atraso de mensagens | (Implementável via `FaultyChannel` com delay)     |
-| Falha de líder      | Pausar nó líder e aguardar nova eleição           |
-| Logs inconsistentes | Manipulação direta de `MemStorage` antes do teste |
+| Perda de pacotes    | Descarte probabilístico na simulação de canal     |
+| Falha de nó         | Pausa e suspensão temporária do nó no simulador   |
+| Partição de rede    | Bloqueio bidirecional entre conjuntos de nós      |
+| Atraso de mensagens | Bufferização e entrega tardia de mensagens        |
+| Falha de líder      | Pausa do líder atual para forçar eleição          |
+| Logs inconsistentes | Inicialização direta do array do log com dados divergentes |
 
 ---
 
@@ -397,7 +131,7 @@ A implementação do protocolo Raft apresentada neste relatório demonstra uma a
 
 Embora o algoritmo Raft completo especifique mecanismos para mudança dinâmica de configuração (como adição e remoção de nós) e compactação de logs através de snapshots para gerenciar o crescimento do estado físico, essas funcionalidades não foram incluídas na presente implementação. O raciocínio para essa decisão de design reside no fato de que o núcleo implementado — contendo a eleição de líder estável, a replicação básica de entradas e a recuperação de logs consistentes — é suficiente para atingir consistência sequencial na máquina de estados replicada. Em ambientes controlados ou acadêmicos, a configuração estática do cluster e a ausência de snapshots não comprometem a correção das propriedades de segurança e liveness do consenso, mantendo a integridade da ordem de execução de todas as operações por todos os nós.
 
-O uso de traits genéricas para `Storage`, `Channel` e `RngProvider` permite que a mesma implementação core seja testada em diversos cenários de falha sem modificação do código principal. Esta arquitetura facilita não apenas testes unitários e de integração, mas também a extensão do sistema para diferentes backends de armazenamento e protocolos de comunicação.
+O uso de abstrações genéricas para o armazenamento, o canal de comunicação e o gerador de números aleatórios permite que a mesma implementação do núcleo do protocolo seja testada em diversos cenários de falha sem modificação do código principal. Esta arquitetura facilita não apenas testes unitários e de integração, mas também a extensão do sistema para diferentes backends de armazenamento e protocolos de comunicação.
 
 A inclusão de suporte a WebAssembly amplia o escopo de aplicação da implementação, permitindo sua utilização em ambientes de navegador para fins educacionais, de visualização ou até mesmo em aplicações distribuídas que operam parcialmente no client-side.
 
