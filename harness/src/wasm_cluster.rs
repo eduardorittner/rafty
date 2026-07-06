@@ -46,6 +46,7 @@ pub struct WasmCluster {
     message_buffer: Rc<RefCell<Vec<ClusterMessage>>>,
     timer_id: RefCell<Option<i32>>,
     pending_messages: Rc<RefCell<std::collections::HashMap<u64, u64>>>,
+    is_paused: Rc<std::cell::Cell<bool>>,
 }
 
 #[wasm_bindgen]
@@ -63,6 +64,7 @@ impl WasmCluster {
             message_buffer: Rc::new(RefCell::new(Vec::new())),
             timer_id: RefCell::new(None),
             pending_messages: Rc::new(RefCell::new(std::collections::HashMap::new())),
+            is_paused: Rc::new(std::cell::Cell::new(false)),
         };
 
         // Set up message interception
@@ -71,14 +73,14 @@ impl WasmCluster {
             let message_buffer = Rc::clone(&cluster.message_buffer);
             let callback_registry = Rc::clone(&cluster.callback_registry);
             let pending_messages = Rc::clone(&cluster.pending_messages);
-            let inner_clone = Rc::clone(&cluster.inner);
+            let is_paused_cell = Rc::clone(&cluster.is_paused);
             let cluster_size = inner.cluster.nodes.len() as u64;
 
             for node in &mut inner.cluster.nodes {
                 let message_buffer = Rc::clone(&message_buffer);
                 let callback_registry = Rc::clone(&callback_registry);
                 let pending_messages = Rc::clone(&pending_messages);
-                let inner_clone = Rc::clone(&inner_clone);
+                let is_paused_cell = Rc::clone(&is_paused_cell);
 
                 let node_id = u64::from(node.id);
 
@@ -97,7 +99,7 @@ impl WasmCluster {
                         ProtoMessageType::RequestVoteResponse => "RequestVoteResponse",
                     };
 
-                    let is_paused = inner_clone.borrow().is_paused;
+                    let is_paused = is_paused_cell.get();
 
                     // Handle broadcast messages (to == 0) by creating individual messages for each recipient
                     if msg.to == 0 {
@@ -181,6 +183,7 @@ impl WasmCluster {
                 message_buffer: Rc::clone(&self.message_buffer),
                 timer_id: RefCell::new(None),
                 pending_messages: Rc::clone(&self.pending_messages),
+                is_paused: Rc::clone(&self.is_paused),
             };
 
             let callback = Closure::<dyn Fn()>::new(move || {
@@ -238,12 +241,14 @@ impl WasmCluster {
 
     /// Pauses the entire cluster (no new messages sent, but existing messages are preserved)
     pub fn pause_cluster(&self) {
+        self.is_paused.set(true);
         let mut inner = self.inner.borrow_mut();
         inner.is_paused = true;
     }
 
     /// Resumes the cluster
     pub fn resume_cluster(&self) {
+        self.is_paused.set(false);
         {
             let mut inner = self.inner.borrow_mut();
             inner.is_paused = false;
@@ -256,6 +261,7 @@ impl WasmCluster {
         let is_unpausing = {
             let mut inner = self.inner.borrow_mut();
             inner.is_paused = !inner.is_paused;
+            self.is_paused.set(inner.is_paused);
             !inner.is_paused
         };
         if is_unpausing {
@@ -265,8 +271,7 @@ impl WasmCluster {
 
     /// Gets cluster paused state
     pub fn is_cluster_paused(&self) -> bool {
-        let inner = self.inner.borrow();
-        inner.is_paused
+        self.is_paused.get()
     }
 
     /// Sets the tick interval in milliseconds
@@ -405,6 +410,7 @@ impl WasmCluster {
     /// Resets cluster to initial state
     pub fn reset(&self) {
         self.stop();
+        self.is_paused.set(false);
         {
             let mut inner = self.inner.borrow_mut();
             let new_cluster = Cluster::from_config(
@@ -412,6 +418,7 @@ impl WasmCluster {
                 crate::FaultRate(100),
             );
             inner.cluster = new_cluster;
+            inner.is_paused = false;
         }
         self.message_buffer.borrow_mut().clear();
         self.pending_messages.borrow_mut().clear();
@@ -503,9 +510,10 @@ impl WasmCluster {
                 message_buffer: Rc::clone(&self.message_buffer),
                 timer_id: RefCell::new(None),
                 pending_messages: Rc::clone(&self.pending_messages),
+                is_paused: Rc::clone(&self.is_paused),
             };
 
-            let callback = Closure::once(move || {
+            let callback = Closure::<dyn Fn()>::new(move || {
                 cluster_clone.tick();
             });
 

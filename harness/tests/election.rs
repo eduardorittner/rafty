@@ -1,5 +1,5 @@
 use harness::{Cluster, ONLY_FAULT};
-use proto::proto::{ProtoMessage, ProtoMessageType, Entry};
+use proto::proto::{Entry, ProtoMessage, ProtoMessageType};
 use raft::{INVALID_ID, NodeId, Role, Storage};
 use test_log::test;
 
@@ -105,8 +105,10 @@ fn elect_leader_right_after_majority() {
 
         // Candidate should have become leader immediately after half of all other nodes have voted
         // for it
-        if id as u64 >= cluster_size / 2 {
+        if id as u64 >= cluster_size / 2 - 1 {
             assert!(matches!(candidate.role, Role::Leader(_)));
+        } else {
+            assert!(matches!(candidate.role, Role::Candidate(_)));
         }
     }
 }
@@ -279,14 +281,19 @@ fn stale_leader_steps_down() {
 #[test]
 fn election_candidate_log_less_up_to_date_term() {
     let mut cluster = Cluster::new();
-    
+
     // Candidate (Node 1) has log ending in term 1
     let entry_t1 = Entry {
         term: 1,
         index: 1,
         data: vec![1],
     };
-    cluster.get_mut(1).storage.store.append(vec![entry_t1.clone()]).unwrap();
+    cluster
+        .get_mut(1)
+        .storage
+        .store
+        .append(vec![entry_t1.clone()])
+        .unwrap();
     cluster.get_mut(1).term = 2; // Campaign will increase term to 3
 
     // Voter (Node 2) has log ending in term 2 (more up-to-date term)
@@ -295,7 +302,12 @@ fn election_candidate_log_less_up_to_date_term() {
         index: 1,
         data: vec![2],
     };
-    cluster.get_mut(2).storage.store.append(vec![entry_t2]).unwrap();
+    cluster
+        .get_mut(2)
+        .storage
+        .store
+        .append(vec![entry_t2])
+        .unwrap();
     cluster.get_mut(2).term = 2;
 
     // Node 1 starts a campaign (term becomes 3)
@@ -322,7 +334,7 @@ fn election_candidate_log_less_up_to_date_term() {
         .recv
         .try_recv()
         .expect("Candidate should have received vote response");
-    
+
     let resp_msg: proto::proto::Message = response.into();
     if let proto::proto::Message::RequestVoteResponse(ref resp) = resp_msg {
         assert_eq!(resp.voted_for, INVALID_ID.into());
@@ -334,14 +346,19 @@ fn election_candidate_log_less_up_to_date_term() {
 #[test]
 fn election_candidate_log_less_up_to_date_index() {
     let mut cluster = Cluster::new();
-    
+
     // Candidate (Node 1) has log ending at index 1 (term 1)
     let entry1 = Entry {
         term: 1,
         index: 1,
         data: vec![1],
     };
-    cluster.get_mut(1).storage.store.append(vec![entry1.clone()]).unwrap();
+    cluster
+        .get_mut(1)
+        .storage
+        .store
+        .append(vec![entry1.clone()])
+        .unwrap();
     cluster.get_mut(1).term = 1;
 
     // Voter (Node 2) has log ending at index 2 (term 1) (longer log)
@@ -350,7 +367,12 @@ fn election_candidate_log_less_up_to_date_index() {
         index: 2,
         data: vec![2],
     };
-    cluster.get_mut(2).storage.store.append(vec![entry1, entry2]).unwrap();
+    cluster
+        .get_mut(2)
+        .storage
+        .store
+        .append(vec![entry1, entry2])
+        .unwrap();
     cluster.get_mut(2).term = 1;
 
     // Node 1 starts a campaign (term becomes 2)
@@ -377,7 +399,7 @@ fn election_candidate_log_less_up_to_date_index() {
         .recv
         .try_recv()
         .expect("Candidate should have received vote response");
-    
+
     let resp_msg: proto::proto::Message = response.into();
     if let proto::proto::Message::RequestVoteResponse(ref resp) = resp_msg {
         assert_eq!(resp.voted_for, INVALID_ID.into());
@@ -389,7 +411,7 @@ fn election_candidate_log_less_up_to_date_index() {
 #[test]
 fn election_voter_rejects_vote_if_already_voted_in_same_term() {
     let mut cluster = Cluster::from_config(Cluster::initial_config(3), harness::NO_FAULT);
-    
+
     // Voter (Node 2) is at term 2, and already voted for Node 3
     let voter = cluster.get_mut(2);
     voter.term = 2;
@@ -421,7 +443,7 @@ fn election_voter_rejects_vote_if_already_voted_in_same_term() {
         .recv
         .try_recv()
         .expect("Candidate should have received vote response");
-    
+
     let resp_msg: proto::proto::Message = response.into();
     if let proto::proto::Message::RequestVoteResponse(ref resp) = resp_msg {
         assert_eq!(resp.voted_for, 3);
