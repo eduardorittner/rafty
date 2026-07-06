@@ -433,7 +433,6 @@ fn randomized_protocol_chaos_test() {
                 }
             }
         }
-
         assert!(converged, "Cluster did not converge to a single leader with synchronized logs after 100 ticks");
         let leader_id = leader_id_opt.unwrap();
 

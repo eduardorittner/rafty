@@ -198,6 +198,7 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
 
     /// Perform a tick.
     pub fn tick(&mut self) {
+        let mut needs_heartbeat = false;
         match &mut self.role {
             Role::Follower(state) => {
                 state.ticks_since_last_msg += 1;
@@ -214,15 +215,17 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
                     return;
                 }
             }
-            Role::Leader(LeaderState {
-                ticks_since_last_heartbeat,
-                ..
-            }) => {
-                *ticks_since_last_heartbeat += 1;
-                if *ticks_since_last_heartbeat >= self.config.ticks_between_heartbeats.get() {
-                    self.broadcast_heartbeats();
+            Role::Leader(state) => {
+                state.ticks_since_last_heartbeat += 1;
+                if state.ticks_since_last_heartbeat >= self.config.ticks_between_heartbeats.get() {
+                    needs_heartbeat = true;
+                    state.ticks_since_last_heartbeat = 0;
                 }
             }
+        }
+
+        if needs_heartbeat {
+            self.broadcast_heartbeats();
         }
     }
 
@@ -285,6 +288,25 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
                         );
                         self.leader_id = from;
                     }
+
+                    // Verify log consistency before advancing commit index
+                    let mut log_matches = false;
+                    if req.last_index == 0 {
+                        log_matches = true;
+                    } else if let Ok(term) = self.storage.store.term(req.last_index) {
+                        if term == req.last_term {
+                            log_matches = true;
+                        }
+                    }
+
+                    if log_matches && req.commit > self.storage.committed {
+                        self.storage.committed = std::cmp::min(req.commit, req.last_index);
+                        info!(
+                            "[{}] Follower advancing commit index to {}",
+                            self.id, self.storage.committed
+                        );
+                    }
+
                     self.send_heartbeat_response();
                 }
             }
@@ -304,6 +326,25 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
                         "[{}] was candidate, became follower of {}",
                         self.id, self.leader_id
                     );
+
+                    // Verify log consistency before advancing commit index
+                    let mut log_matches = false;
+                    if req.last_index == 0 {
+                        log_matches = true;
+                    } else if let Ok(term) = self.storage.store.term(req.last_index) {
+                        if term == req.last_term {
+                            log_matches = true;
+                        }
+                    }
+
+                    if log_matches && req.commit > self.storage.committed {
+                        self.storage.committed = std::cmp::min(req.commit, req.last_index);
+                        info!(
+                            "[{}] Follower advancing commit index to {}",
+                            self.id, self.storage.committed
+                        );
+                    }
+
                     self.send_heartbeat_response();
                 }
             }
@@ -319,6 +360,25 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
                         "[{}] was leader, became follower of {}",
                         self.id, self.leader_id
                     );
+
+                    // Verify log consistency before advancing commit index
+                    let mut log_matches = false;
+                    if req.last_index == 0 {
+                        log_matches = true;
+                    } else if let Ok(term) = self.storage.store.term(req.last_index) {
+                        if term == req.last_term {
+                            log_matches = true;
+                        }
+                    }
+
+                    if log_matches && req.commit > self.storage.committed {
+                        self.storage.committed = std::cmp::min(req.commit, req.last_index);
+                        info!(
+                            "[{}] Follower advancing commit index to {}",
+                            self.id, self.storage.committed
+                        );
+                    }
+
                     self.send_heartbeat_response();
                 }
             }
@@ -341,23 +401,52 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
             return;
         }
 
-        // Check if we need to replicate entries to this follower
+        // Update follower progress and check if we need to replicate entries
         let follower_id = ValidNodeId::new(resp.from);
         if let Some(follower_id) = follower_id {
             let last_index = self.storage.store.last_index();
             let mut needs_replication = false;
-            if let Role::Leader(ref state) = self.role {
+            if let Role::Leader(ref mut state) = self.role {
                 if state.follower_progress.contains_key(follower_id) {
-                    let progress = &state.follower_progress[follower_id];
+                    let progress = &mut state.follower_progress[follower_id];
+
+                    // Update match_index if the follower's log is verified to match ours
+                    let match_idx = resp.last_index;
+                    if match_idx > 0 {
+                        if let Ok(local_term) = self.storage.store.term(match_idx) {
+                            if local_term == resp.last_term {
+                                if match_idx > progress.match_index {
+                                    progress.update_on_success(match_idx);
+                                }
+                            } else {
+                                // Term mismatch: conflict at match_idx
+                                if progress.next_index > match_idx {
+                                    progress.next_index = match_idx;
+                                }
+                            }
+                        }
+                    } else {
+                        // Follower has empty log
+                        progress.next_index = 1;
+                    }
+
+                    // Also check if the follower's reported log is behind our next_index
+                    if match_idx + 1 < progress.next_index {
+                        progress.next_index = match_idx + 1;
+                    }
+
                     if last_index >= progress.next_index {
                         needs_replication = true;
                     }
                 }
             }
+
             if needs_replication {
                 self.send_append_entries_to(follower_id.into(), last_index);
             }
         }
+
+        self.maybe_commit_entries();
     }
 
     fn step_vote_request(&mut self, req: RequestVote) {
@@ -441,6 +530,8 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
                         );
 
                         self.leader_id = self.id.into();
+                        // Propose a blank no-op entry at the start of the term to commit prior term entries
+                        self.propose_entry(Vec::new());
                     }
                     crate::quorum::ElectionState::Lost => {
                         self.role = self.role.to_owned().become_follower()
