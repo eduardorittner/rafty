@@ -44,7 +44,7 @@ Necessários para rodar o cenário multi-nós em rede simulada próxima da produ
 
 ---
 
-## 🚀 2. Compilando e Testando o Núcleo (Rust)
+## 2. Compilando e Testando o Núcleo (Rust)
 
 Para compilar todo o workspace e garantir que todos os testes unitários e de integração (eleição, replicação de entradas, comportamento caótico de rede) estão passando:
 
@@ -58,7 +58,7 @@ cargo test
 
 ---
 
-## 🐳 3. Cenário Multi-Nós com Docker Compose
+## 3. Cenário Multi-Nós com Docker Compose
 
 Este cenário simula um cluster de 3 nós Raft reais se comunicando via sockets TCP. O gerenciamento é feito via o arquivo `Makefile` na raiz do projeto.
 
@@ -98,20 +98,16 @@ make clean
 
 ---
 
-## 🌐 4. Visualizador Web interativo (WebAssembly + Vite)
+## 4. Visualizador Web interativo (WebAssembly + Vite)
 
 Este cenário compila a lógica do Raft para WebAssembly e a executa diretamente no navegador, fornecendo uma visualização dinâmica de eventos do cluster.
 
 ### Passo 1: Compilar o código Rust para WASM
-Execute o script utilitário na raiz do projeto:
+Execute o comando do Makefile na raiz do projeto:
 ```bash
-# Torne o script executável (caso necessário)
-chmod +x wasm.sh
-
-# Execute a compilação
-./wasm.sh
+make wasm
 ```
-*(Este script executa: `cd harness && wasm-pack build --release --target web --out-dir pkg --out-name rafty_wasm`)*
+*(Esse comando executa internamente: `cd harness && wasm-pack build --release --target web --out-dir pkg --out-name rafty_wasm`)*
 
 ### Passo 2: Executar o servidor Web do Vite
 ```bash
