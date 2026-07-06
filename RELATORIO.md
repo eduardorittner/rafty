@@ -1,5 +1,7 @@
 # Relatório Técnico: Implementação do Protocolo Raft em Rust com Target WASM
 
+**Repositório do Projeto:** [github.com/eduardorittner/rafty](https://github.com/eduardorittner/rafty)
+
 ## 1. Introdução do Problema
 
 No contexto de sistemas distribuídos, o problema do consenso tem como objetivo fazer com que nós independentes concordem sobre uma sequência de valores mesmo na presença de falhas parciais do sistema. Este problema é fundamental para a construção de sistemas tolerantes a falhas, como bancos de dados distribuídos, sistemas de coordenação e blockchains. No entanto, "falhas parciais" é um termo vago, e cada algoritmo de consenso distribuído possui garantias distintas, e protege contra tipos de falhas distintos.
@@ -12,7 +14,7 @@ Paralelamente ao desenvolvimento do Paxos, **Viewstamped Replication** foi propo
 
 Outras variações do Paxos, como **Multi-Paxos** (para consenso sobre sequências de valores)[^2] e **Fast Paxos** (para otimização de latência)[^3], herdaram esta complexidade, limitando sua adoção em sistemas práticos. A dificuldade de implementação correta levou muitos engenheiros a desenvolverem soluções ad-hoc, frequentemente incorretas ou incompletas.
 
-Publicado em 2014 por Diego Ongaro e John Ousterhout, o **Raft** foi projetado com um objetivo explícito: ser **compreensível**. Diferentemente do Paxos, que foi desenvolvido primeiramente como um exercício teórico, o Raft foi concebido desde o início como uma base prática para implementação de sistemas reais. As principais inovações do Raft em termos de compreensibilidade incluem:
+Publicado em 2014 por Diego Ongaro e John Ousterhout[^4], o **Raft** foi projetado com um objetivo explícito: ser **compreensível**. Diferentemente do Paxos, que foi desenvolvido primeiramente como um exercício teórico, o Raft foi concebido desde o início como uma base prática para implementação de sistemas reais. As principais inovações do Raft em termos de compreensibilidade incluem:
 
 1. **Decomposição modular**: O algoritmo separa claramente as sub-tarefas de consenso em componentes distintos que podem ser discutidos, implementados e testados separadamente: eleição de líder, replicação do log e segurança.
 2. **Fortes garantias de estado**: O Raft impõe restrições mais fortes que o Paxos, limitando o espaço de estados possíveis e simplificando o raciocínio sobre o sistema.
@@ -69,7 +71,7 @@ A formulação matemática do Raft garante as seguintes propriedades críticas:
 
 ## 3. Detalhes da Implementação
 
-A implementação é organizada em três componentes principais:
+A implementação é escrita em Rust[^8] e organizada em três componentes principais:
 - **Definição de Mensagens**: Contém a especificação das mensagens do protocolo utilizando Protocol Buffers (protobuf), garantindo serialização eficiente e independente de linguagem.
 - **Núcleo do Protocolo**: Contém a lógica de consenso, controle de estado do nó, eleição de líder e replicação do log.
 - **Infraestrutura de Simulação**: Contém o simulador para criação de clusters em memória, injeção de falhas de rede e inspeção do estado interno de cada nó.
@@ -82,9 +84,9 @@ O processamento é guiado por duas operações fundamentais:
 
 Esta separação caracteriza o padrão **push/pull**: mensagens de rede são "empurradas" (*push*) para o nó através de eventos, enquanto o controle de tempo e expiração de timeouts é verificado de forma ativa (*pull*).
 
-Para validação e integração, a infraestrutura de simulação provê um simulador de cluster que gerencia múltiplos nós em um único processo. Ele permite pausar e retomar nós individualmente, além de interceptar e manipular as mensagens trocadas, tornando viável a simulação de falhas de rede complexas de forma controlada. Adicionalmente, o sistema é compilado para WebAssembly (WASM), permitindo que todo o cluster simulado e a lógica de consenso rodem diretamente no navegador para fins de visualização gráfica e demonstrações educacionais.
+Para validação e integração, a infraestrutura de simulação provê um simulador de cluster que gerencia múltiplos nós em um único processo. Ele permite pausar e retomar nós individualmente, além de interceptar e manipular as mensagens trocadas, tornando viável a simulação de falhas de rede complexas de forma controlada. Adicionalmente, o sistema é compilado para WebAssembly (WASM)[^9], permitindo que todo o cluster simulado e a lógica de consenso rodem diretamente no navegador para fins de visualização gráfica e demonstrações educacionais.
 
-A comunicação física entre os nós baseia-se em **Protocol Buffers**, que define os dados das entradas de log (`Entry`), as mensagens de controle de termo, commits, respostas e os tipos de mensagens (`AppendEntries`, `RequestVote`, etc.). A lógica do protocolo consome essas estruturas por meio de uma camada de tipos seguros que encapsula as mensagens de rede em representações internas da aplicação. 
+A comunicação física entre os nós baseia-se em **Protocol Buffers**[^7], que define os dados das entradas de log (`Entry`), as mensagens de controle de termo, commits, respostas e os tipos de mensagens (`AppendEntries`, `RequestVote`, etc.). A lógica do protocolo consome essas estruturas por meio de uma camada de tipos seguros que encapsula as mensagens de rede em representações internas da aplicação. 
 
 Para a execução em rede real, a abstração de canal de comunicação é implementada através de conexões de sockets TCP tradicionais. Cada nó estabelece fluxos de dados com seus pares para o envio e broadcast de mensagens serializadas.
 
