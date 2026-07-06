@@ -512,6 +512,9 @@ impl<Store: Storage, Chan: Channel, Rng: RngProvider> Node<Store, Chan, Rng> {
                     self.voted_for = INVALID_ID;
                     self.role = self.role.to_owned().become_follower();
                     return;
+                } else if req.term < self.term {
+                    // Ignore vote responses from older terms
+                    return;
                 }
 
                 let vote = if req.voted_for == self.id.into() {
