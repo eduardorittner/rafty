@@ -1,4 +1,15 @@
-.PHONY: up down build clean wasm
+.PHONY: up down build clean wasm test
+
+# Support passing a number of tests as an argument (e.g. `make test 1000`)
+ifeq ($(firstword $(MAKECMDGOALS)),test)
+  # use the rest as arguments for the "test" target
+  TEST_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  # ...and turn them into do-nothing targets so make won't complain about missing targets
+  $(eval $(TEST_ARGS):;@:)
+endif
+
+test:
+	python3 scripts/run_tests.py $(TEST_ARGS)
 
 up:
 	docker compose -f docker-scenario/docker-compose.yml up --build -d
