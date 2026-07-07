@@ -47,6 +47,7 @@ fn randomized_lossy_network() {
         // 5-node cluster
         let config = Cluster::initial_config(5);
         let mut cluster = Cluster::from_config_with_rng(config, drop_rate, rng.clone());
+        cluster.randomize_tick_order = true;
 
         // Run for 5x the max election timeout ticks (max_ticks = 20, so 100 ticks)
         for _ in 0..100 {
@@ -85,31 +86,20 @@ fn randomized_lossy_network() {
 #[test]
 fn randomized_transient_node_outages() {
     run_randomized_test(|seed| {
-        let mut rng = DeterministicRng::new(seed);
+        let rng = DeterministicRng::new(seed);
         let config = Cluster::initial_config(5);
         // NO_FAULT network (except for node outages)
         let mut cluster = Cluster::from_config_with_rng(config, NO_FAULT, rng.clone());
+        cluster.randomize_tick_order = true;
+        cluster.randomize_pauses = true;
 
-        // Run for 120 ticks. In each tick, we randomly pause or resume nodes,
-        // but we guarantee that at least 3 nodes are always active (so quorum is possible).
-        for tick in 0..120 {
-            // Every 10 ticks, we toggle a random node
-            if tick % 10 == 0 {
-                // Count active nodes
-                let active_count = 5 - cluster.paused_nodes.len();
-                // We randomly pick a node to toggle
-                let target_node = rng.random_range(1, 6);
-                if cluster.is_node_paused(target_node) {
-                    cluster.resume_node(target_node);
-                } else if active_count > 3 {
-                    // Only pause if we still have at least 3 active nodes
-                    cluster.pause_node(target_node);
-                }
-            }
+        // Run for 120 ticks.
+        for _ in 0..120 {
             cluster.tick_active();
         }
 
         // Now heal all nodes
+        cluster.randomize_pauses = false;
         for id in 1..=5 {
             cluster.resume_node(id);
         }
@@ -154,6 +144,7 @@ fn randomized_log_agreement() {
         let config = Cluster::initial_config(3);
         // 90% delivery rate
         let mut cluster = Cluster::from_config_with_rng(config, FaultRate(90), rng.clone());
+        cluster.randomize_tick_order = true;
 
         // Run for 40 ticks to elect a leader
         for _ in 0..40 {
@@ -292,22 +283,11 @@ fn randomized_protocol_chaos_test() {
         // 5-node cluster
         let config = Cluster::initial_config(5);
         let mut cluster = Cluster::from_config_with_rng(config, drop_rate, rng.clone());
+        cluster.randomize_tick_order = true;
+        cluster.randomize_pauses = true;
 
         // Run for 150 chaos ticks
         for tick in 0..150 {
-            // 1. With 10% probability, toggle a random node's paused/active state.
-            // But ensure we keep at least 3 active nodes (majority/quorum) so progress is possible.
-            if rng.random_range(1, 101) <= 10 {
-                let active_count = 5 - cluster.paused_nodes.len();
-                let target_node = rng.random_range(1, 6);
-                
-                if cluster.is_node_paused(target_node) {
-                    cluster.resume_node(target_node);
-                } else if active_count > 3 {
-                    cluster.pause_node(target_node);
-                }
-            }
-
             // 2. Tick the active nodes in the cluster
             cluster.tick_active();
 
@@ -385,6 +365,7 @@ fn randomized_protocol_chaos_test() {
         }
 
         // 5. Heal the cluster: Resume all paused nodes and heal network (0% drop rate)
+        cluster.randomize_pauses = false;
         for id in 1..=5 {
             cluster.resume_node(id);
         }

@@ -13,22 +13,11 @@ fn run_chaos_test_with_seed(seed: u64) {
     // 5-node cluster
     let config = Cluster::initial_config(5);
     let mut cluster = Cluster::from_config_with_rng(config, drop_rate, rng.clone());
+    cluster.randomize_tick_order = true;
+    cluster.randomize_pauses = true;
 
     // Run for 150 chaos ticks
     for tick in 0..150 {
-        // 1. With 10% probability, toggle a random node's paused/active state.
-        // But ensure we keep at least 3 active nodes (majority/quorum) so progress is possible.
-        if rng.random_range(1, 101) <= 10 {
-            let active_count = 5 - cluster.paused_nodes.len();
-            let target_node = rng.random_range(1, 6);
-            
-            if cluster.is_node_paused(target_node) {
-                cluster.resume_node(target_node);
-            } else if active_count > 3 {
-                cluster.pause_node(target_node);
-            }
-        }
-
         // 2. Tick the active nodes in the cluster
         cluster.tick_active();
 
@@ -106,6 +95,7 @@ fn run_chaos_test_with_seed(seed: u64) {
     }
 
     // 5. Heal the cluster: Resume all paused nodes and heal network (0% drop rate)
+    cluster.randomize_pauses = false;
     for id in 1..=5 {
         cluster.resume_node(id);
     }

@@ -68,6 +68,8 @@ pub struct Cluster<Rng: RngProvider = raft::DefaultRng> {
     /// Current tick rate in milliseconds
     pub tick_rate_ms: u64,
     pub rng: Rng,
+    pub randomize_tick_order: bool,
+    pub randomize_pauses: bool,
 }
 
 impl Cluster<raft::DefaultRng> {
@@ -136,6 +138,8 @@ impl<Rng: RngProvider> Cluster<Rng> {
             state_callbacks: Vec::new(),
             tick_rate_ms: 500,
             rng,
+            randomize_tick_order: false,
+            randomize_pauses: false,
         }
     }
 
@@ -218,16 +222,51 @@ impl<Rng: RngProvider> Cluster<Rng> {
 
     /// Tick only active (non-paused) nodes and process incoming messages
     pub fn tick_active(&mut self) {
+        if self.randomize_pauses {
+            // With 10% probability, toggle a random node's paused/active state.
+            // But ensure we keep at least majority active.
+            if self.rng.random_range(1, 101) <= 10 {
+                let size = self.nodes.len();
+                let majority = size / 2 + 1;
+                let active_count = size - self.paused_nodes.len();
+                let target_node = self.rng.random_range(1, size as u64 + 1);
+                
+                if self.is_node_paused(target_node) {
+                    self.resume_node(target_node);
+                } else if active_count > majority {
+                    self.pause_node(target_node);
+                }
+            }
+        }
+
+        let mut tick_indices: Vec<usize> = (0..self.nodes.len()).collect();
+        if self.randomize_tick_order {
+            for i in (1..tick_indices.len()).rev() {
+                let j = self.rng.random_range(0, (i + 1) as u64) as usize;
+                tick_indices.swap(i, j);
+            }
+        }
+
         // First, tick all active nodes (increment timers, may send messages)
-        for node in &mut self.nodes {
+        for idx in tick_indices {
+            let node = &mut self.nodes[idx];
             if !self.paused_nodes.contains(&u64::from(node.id)) {
                 node.tick();
             }
         }
 
+        let mut step_indices: Vec<usize> = (0..self.nodes.len()).collect();
+        if self.randomize_tick_order {
+            for i in (1..step_indices.len()).rev() {
+                let j = self.rng.random_range(0, (i + 1) as u64) as usize;
+                step_indices.swap(i, j);
+            }
+        }
+
         // Then, step all active nodes to process incoming messages
         // Ignore messages from paused nodes (they're "dead" and their messages should be discarded)
-        for node in &mut self.nodes {
+        for idx in step_indices {
+            let node = &mut self.nodes[idx];
             if !self.paused_nodes.contains(&u64::from(node.id)) {
                 // Process messages, but discard any from paused/crashed nodes
                 while let Ok(msg) = node.channel.recv.try_recv() {
